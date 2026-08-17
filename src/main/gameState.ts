@@ -242,11 +242,17 @@ export class GameState extends EventEmitter {
     }
 
     // Fan out enrichment. Progressive: identity -> rank+mastery -> matches.
-    await Promise.all(
-      [...this.players.values()]
-        .filter((s) => !s.live.isBot)
-        .map((s) => this.enrichPlayer(s, force))
+    // Enrich each player only once per game: later Live Client polls (every few
+    // seconds) just refresh the live scoreboard above and must NOT re-queue the
+    // whole set of Riot API calls, or the request queue balloons. A player whose
+    // identity is still 'idle' hasn't been started yet; `force` (Re-scout)
+    // re-runs everyone. Players that errored are left for a manual Re-scout.
+    const toEnrich = [...this.players.values()].filter(
+      (s) => !s.live.isBot && (force || s.loading.identity === 'idle')
     )
+    if (toEnrich.length === 0) return
+
+    await Promise.all(toEnrich.map((s) => this.enrichPlayer(s, force)))
 
     // Once match histories are in, detect premades per team.
     this.detectAndLabelPremades()

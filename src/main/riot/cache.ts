@@ -21,6 +21,8 @@ export interface CacheOptions {
 
 export class TtlCache {
   private readonly map = new Map<string, Entry<unknown>>()
+  /** In-flight computations, for request de-duplication. */
+  private readonly pending = new Map<string, Promise<unknown>>()
   private readonly ttlMs: number
   private readonly filePath?: string
   private readonly now: () => number
@@ -76,13 +78,32 @@ export class TtlCache {
     this.scheduleSave()
   }
 
-  /** Return cached value or compute+store it. */
+  /**
+   * Return cached value or compute+store it. Concurrent calls for the same key
+   * share a single in-flight computation (request de-duplication) so repeated
+   * lookups — e.g. the live poller re-scouting every few seconds before the
+   * first request has resolved — never launch duplicate API calls.
+   */
   async getOrCompute<T>(key: string, compute: () => Promise<T>, ttlMs?: number): Promise<T> {
     const hit = this.get<T>(key)
     if (hit !== undefined) return hit
-    const value = await compute()
-    this.set(key, value, ttlMs)
-    return value
+
+    const existing = this.pending.get(key)
+    if (existing) return existing as Promise<T>
+
+    const p = (async () => {
+      const value = await compute()
+      this.set(key, value, ttlMs)
+      return value
+    })()
+    this.pending.set(key, p)
+    try {
+      return await p
+    } finally {
+      // Clear on both success and failure; failures stay uncached so a later
+      // call can retry, but never pile up while one is in flight.
+      this.pending.delete(key)
+    }
   }
 
   private scheduleSave(): void {
