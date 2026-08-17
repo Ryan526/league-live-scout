@@ -223,6 +223,8 @@ export const IPC = {
   setRegion: 'settings:setRegion',
   testApiKey: 'settings:testApiKey',
   rescout: 'scout:rescout',
+  // renderer -> main (send, fire-and-forget)
+  resizeWindow: 'window:resizeToContent',
   // main -> renderer (send)
   snapshot: 'scout:snapshot',
   rateStatus: 'scout:rateStatus',

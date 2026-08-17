@@ -1,5 +1,5 @@
 import { join } from 'path'
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, screen } from 'electron'
 import { IPC, type RegionConfig } from '@shared/types'
 import { Settings } from './settings'
 import { GameState } from './gameState'
@@ -69,6 +69,37 @@ function registerIpc(): void {
   ipcMain.handle(IPC.rescout, async () => {
     await gameState.rescout()
     return gameState.getSnapshot()
+  })
+
+  // Auto-fit: the renderer reports the natural size of its content and we grow
+  // (or shrink) the window to show everything, clamped to the current display's
+  // work area. Skipped while maximized/fullscreen so we don't fight the user.
+  ipcMain.on(IPC.resizeWindow, (_e, size: { width: number; height: number }) => {
+    if (
+      !mainWindow ||
+      mainWindow.isDestroyed() ||
+      mainWindow.isMaximized() ||
+      mainWindow.isFullScreen()
+    ) {
+      return
+    }
+    const wa = screen.getDisplayMatching(mainWindow.getBounds()).workArea
+    const w = Math.min(Math.max(Math.round(size.width), 820), wa.width)
+    const h = Math.min(Math.max(Math.round(size.height), 400), wa.height)
+    const [curW, curH] = mainWindow.getContentSize()
+    if (Math.abs(curW - w) < 4 && Math.abs(curH - h) < 4) return
+
+    mainWindow.setContentSize(w, h)
+
+    // Keep the window fully on-screen after growing.
+    const b = mainWindow.getBounds()
+    let x = b.x
+    let y = b.y
+    if (x + b.width > wa.x + wa.width) x = wa.x + wa.width - b.width
+    if (y + b.height > wa.y + wa.height) y = wa.y + wa.height - b.height
+    x = Math.max(x, wa.x)
+    y = Math.max(y, wa.y)
+    if (x !== b.x || y !== b.y) mainWindow.setPosition(x, y)
   })
 }
 

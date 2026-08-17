@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useStore } from './store'
+import { useAutoFit } from './useAutoFit'
 import { StatusBar } from './components/StatusBar'
 import { Scoreboard } from './components/Scoreboard'
 import { Settings } from './components/Settings'
@@ -34,6 +35,9 @@ export default function App(): JSX.Element {
   }, [setSnapshot, setSettings, setRate, pushLog, setSettingsOpen])
 
   const hasPlayers = (snapshot?.players.length ?? 0) > 0
+
+  // Grow/shrink the window to fit whatever is currently on screen.
+  useAutoFit([snapshot, settingsOpen])
 
   return (
     <div className="app">

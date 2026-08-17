@@ -4,6 +4,8 @@ A desktop companion window for **League of Legends (NA)** that auto-detects your
 game and scouts the **9 other players** using the official **Riot Games API** —
 your own personal Porofessor / OP.GG-style pre-game intel.
 
+![League Live Scout scouting a live game — both teams with rank, ranked win rate, KDA, main role, off-role flags, premade detection, peak rank, and recent form](./docs/screenshot.png)
+
 When you enter champ select or a match, it loads every player and surfaces, per
 champion picked:
 

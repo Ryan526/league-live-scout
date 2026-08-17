@@ -18,6 +18,8 @@ const api = {
   testApiKey: (): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke(IPC.testApiKey),
   rescout: (): Promise<ScoutSnapshot> => ipcRenderer.invoke(IPC.rescout),
+  resizeToContent: (width: number, height: number): void =>
+    ipcRenderer.send(IPC.resizeWindow, { width, height }),
 
   onSnapshot: (cb: (snap: ScoutSnapshot) => void): (() => void) => {
     const listener = (_e: unknown, snap: ScoutSnapshot): void => cb(snap)
