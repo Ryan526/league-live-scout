@@ -1,0 +1,212 @@
+// Poller for the in-game Live Client Data API:
+//   https://127.0.0.1:2999/liveclientdata/allgamedata
+// No auth; available from the loading screen to the end of the game. This is
+// where we obtain the enemy team (LCU champ-select only reveals our own side).
+//
+// The endpoint serves a self-signed Riot certificate. Riot publishes the cert,
+// but bundling it is brittle across patches, so we scope an unverified TLS agent
+// strictly to 127.0.0.1:2999 (localhost only) as the plan allows.
+
+import { EventEmitter } from 'events'
+import { Agent } from 'https'
+import { get } from 'https'
+import type { LivePlayer, LiveScores, TeamId } from '@shared/types'
+
+const HOST = '127.0.0.1'
+const PORT = 2999
+
+// Unverified agent, localhost-only. Never used for any other host.
+const localhostAgent = new Agent({ rejectUnauthorized: false, keepAlive: true })
+
+export interface LiveClientEvents {
+  players: (players: LivePlayer[], gameMode: string) => void
+  connected: () => void
+  disconnected: () => void
+}
+
+export declare interface LiveClient {
+  on<K extends keyof LiveClientEvents>(event: K, listener: LiveClientEvents[K]): this
+  emit<K extends keyof LiveClientEvents>(
+    event: K,
+    ...args: Parameters<LiveClientEvents[K]>
+  ): boolean
+}
+
+interface AllGameData {
+  gameData?: { gameMode?: string; gameTime?: number }
+  allPlayers?: Array<{
+    riotId?: string
+    riotIdGameName?: string
+    riotIdTagLine?: string
+    summonerName?: string
+    championName?: string
+    rawChampionName?: string
+    team?: string
+    isBot?: boolean
+    summonerSpells?: {
+      summonerSpellOne?: { displayName?: string }
+      summonerSpellTwo?: { displayName?: string }
+    }
+    scores?: {
+      kills?: number
+      deaths?: number
+      assists?: number
+      creepScore?: number
+      wardScore?: number
+    }
+  }>
+}
+
+export class LiveClient extends EventEmitter {
+  private timer: NodeJS.Timeout | null = null
+  private active = false
+  private wasConnected = false
+  private pollMs: number
+
+  constructor(pollMs = 5000) {
+    super()
+    this.pollMs = pollMs
+  }
+
+  get isConnected(): boolean {
+    return this.wasConnected
+  }
+
+  setPollInterval(ms: number): void {
+    this.pollMs = Math.max(1000, ms)
+  }
+
+  start(): void {
+    if (this.active) return
+    this.active = true
+    void this.tick()
+  }
+
+  stop(): void {
+    this.active = false
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    if (this.wasConnected) {
+      this.wasConnected = false
+      this.emit('disconnected')
+    }
+  }
+
+  /** Single fetch of all game data; returns null when no game is running. */
+  async fetchOnce(): Promise<AllGameData | null> {
+    return new Promise<AllGameData | null>((resolve) => {
+      const req = get(
+        {
+          host: HOST,
+          port: PORT,
+          path: '/liveclientdata/allgamedata',
+          agent: localhostAgent,
+          timeout: 4000
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume()
+            resolve(null)
+            return
+          }
+          let body = ''
+          res.setEncoding('utf8')
+          res.on('data', (c) => (body += c))
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(body) as AllGameData)
+            } catch {
+              resolve(null)
+            }
+          })
+        }
+      )
+      req.on('error', () => resolve(null))
+      req.on('timeout', () => {
+        req.destroy()
+        resolve(null)
+      })
+    })
+  }
+
+  private async tick(): Promise<void> {
+    if (!this.active) return
+    const data = await this.fetchOnce()
+    if (data && data.allPlayers) {
+      if (!this.wasConnected) {
+        this.wasConnected = true
+        this.emit('connected')
+      }
+      const players = parsePlayers(data)
+      this.emit('players', players, data.gameData?.gameMode ?? 'CLASSIC')
+    } else if (this.wasConnected) {
+      this.wasConnected = false
+      this.emit('disconnected')
+    }
+    if (this.active) {
+      this.timer = setTimeout(() => void this.tick(), this.pollMs)
+      if (typeof this.timer.unref === 'function') this.timer.unref()
+    }
+  }
+}
+
+function toTeam(team: string | undefined): TeamId {
+  if (team === 'ORDER') return 'ORDER'
+  if (team === 'CHAOS') return 'CHAOS'
+  return 'UNKNOWN'
+}
+
+function splitRiotId(p: NonNullable<AllGameData['allPlayers']>[number]): {
+  riotId: string
+  gameName: string
+  tagLine: string
+} {
+  // Prefer the split fields when present; fall back to parsing "name#tag".
+  if (p.riotIdGameName) {
+    return {
+      riotId: p.riotId || `${p.riotIdGameName}#${p.riotIdTagLine ?? ''}`,
+      gameName: p.riotIdGameName,
+      tagLine: p.riotIdTagLine ?? ''
+    }
+  }
+  const raw = p.riotId || p.summonerName || ''
+  const hash = raw.lastIndexOf('#')
+  if (hash > 0) {
+    return { riotId: raw, gameName: raw.slice(0, hash), tagLine: raw.slice(hash + 1) }
+  }
+  return { riotId: raw, gameName: raw, tagLine: '' }
+}
+
+export function parsePlayers(data: AllGameData): LivePlayer[] {
+  const out: LivePlayer[] = []
+  for (const p of data.allPlayers ?? []) {
+    const { riotId, gameName, tagLine } = splitRiotId(p)
+    const spells: string[] = []
+    const s1 = p.summonerSpells?.summonerSpellOne?.displayName
+    const s2 = p.summonerSpells?.summonerSpellTwo?.displayName
+    if (s1) spells.push(s1)
+    if (s2) spells.push(s2)
+    const scores: LiveScores | undefined = p.scores
+      ? {
+          kills: p.scores.kills ?? 0,
+          deaths: p.scores.deaths ?? 0,
+          assists: p.scores.assists ?? 0,
+          creepScore: p.scores.creepScore ?? 0,
+          wardScore: p.scores.wardScore ?? 0
+        }
+      : undefined
+    out.push({
+      riotId,
+      gameName,
+      tagLine,
+      championName: p.championName || p.rawChampionName || '',
+      team: toTeam(p.team),
+      summonerSpells: spells,
+      isBot: Boolean(p.isBot),
+      scores
+    })
+  }
+  return out
+}
