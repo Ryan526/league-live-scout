@@ -136,3 +136,13 @@ status bar stays within limits (and re-scouting hits the cache).
   [Riot API developer policies](https://developer.riotgames.com/policies/general).
 - **Approximate signals:** enemy current-role and premade groups are inferred
   from spells / champion tags / shared match history and can be wrong.
+
+## License
+
+Licensed under the **[PolyForm Noncommercial License 1.0.0](./LICENSE.md)** —
+you're free to use, copy, modify, and share it for **any noncommercial purpose**
+(personal use, hobby projects, learning, research). **Commercial use is not
+permitted.** See [`LICENSE.md`](./LICENSE.md) for the full terms.
+
+> This project isn't affiliated with or endorsed by Riot Games. League of Legends
+> and Riot Games are trademarks or registered trademarks of Riot Games, Inc.

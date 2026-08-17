@@ -4,7 +4,7 @@
   "description": "Desktop companion that scouts the 9 other players in your League of Legends game using the official Riot API.",
   "main": "./out/main/index.js",
   "author": "",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE.md",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
