@@ -190,10 +190,21 @@ export class GameState extends EventEmitter {
       this.ownChampSelect.length > 0 ? this.ownChampSelect : await this.lcu.getChampSelect()
     this.ownChampSelect = players
     for (const p of players) {
+      // Record the exact assigned role, keyed by both puuid and game name, so we
+      // can reliably match this champ-select entry to a Live Client player later.
+      // Champ select no longer exposes the tagLine, so we cannot key by full Riot
+      // ID: puuid is the robust key; the bare game name is the early fallback used
+      // before identities are resolved in-game.
+      if (p.assignedPosition && p.assignedPosition !== 'UNKNOWN') {
+        if (p.puuid) this.ownRoles.set(`puuid:${p.puuid}`, p.assignedPosition)
+        if (p.summonerName) {
+          this.ownRoles.set(`name:${p.summonerName.toLowerCase()}`, p.assignedPosition)
+        }
+      }
+      // Identity prewarm needs a full Riot ID; skip when champ select only gave a
+      // bare game name (the common case on current patches).
       if (!p.summonerName || !p.summonerName.includes('#')) continue
       const [gameName, tagLine] = splitName(p.summonerName)
-      // Record the exact assigned role for later off-role comparison.
-      this.ownRoles.set(p.summonerName, p.assignedPosition)
       try {
         const account = await this.cachedAccount(gameName, tagLine)
         if (account) await this.cachedRank(account.puuid)
@@ -254,6 +265,12 @@ export class GameState extends EventEmitter {
 
     await Promise.all(toEnrich.map((s) => this.enrichPlayer(s, force)))
 
+    // Identities are resolved now, so own-team champ-select roles can match by
+    // puuid (the reliable key). Re-run assignment and refresh off-role flags
+    // against the corrected roles.
+    this.assignRoles()
+    this.recomputeOffRoles()
+
     // Once match histories are in, detect premades per team.
     this.detectAndLabelPremades()
     this.scheduleEmit()
@@ -295,8 +312,9 @@ export class GameState extends EventEmitter {
   private assignRoles(): void {
     const all = [...this.players.values()]
     for (const s of all) {
-      // Own team: exact role from champ select if we can match by name.
-      const own = s.live.riotId ? this.ownRoles.get(s.live.riotId) : undefined
+      // Own team: exact role from champ select, matched by puuid (robust) or by
+      // game name (available before identities resolve).
+      const own = this.ownRoleFor(s)
       if (own && own !== 'UNKNOWN') {
         s.currentRole = own
       }
@@ -320,6 +338,34 @@ export class GameState extends EventEmitter {
           summonerSpells: s.live.summonerSpells,
           champion: s.live.championId != null ? this.ddragon.byId(s.live.championId) : undefined
         })
+      }
+    }
+  }
+
+  /** Look up an own-team champ-select role for a tracked player, if we recorded
+   *  one. Prefers the puuid key (exact) and falls back to game name. */
+  private ownRoleFor(s: ScoutedPlayer): Role | undefined {
+    if (s.puuid) {
+      const byPuuid = this.ownRoles.get(`puuid:${s.puuid}`)
+      if (byPuuid) return byPuuid
+    }
+    if (s.live.gameName) {
+      return this.ownRoles.get(`name:${s.live.gameName.toLowerCase()}`)
+    }
+    return undefined
+  }
+
+  /** Recompute off-role flags from the current role assignment and each player's
+   *  derived main role. Called after roles may have changed post-enrichment. */
+  private recomputeOffRoles(): void {
+    for (const s of this.players.values()) {
+      if (
+        s.currentRole &&
+        s.currentRole !== 'UNKNOWN' &&
+        s.stats &&
+        s.stats.mainRole !== 'UNKNOWN'
+      ) {
+        s.offRole = s.currentRole !== s.stats.mainRole
       }
     }
   }
