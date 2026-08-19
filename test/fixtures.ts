@@ -10,7 +10,6 @@ export function participant(
     puuid: over.puuid,
     teamId: over.teamId ?? 100,
     championId: over.championId ?? 1,
-    championName: over.championName ?? 'Annie',
     kills: over.kills ?? 5,
     deaths: over.deaths ?? 3,
     assists: over.assists ?? 7,
@@ -28,9 +27,8 @@ export function match(
   over: Partial<MatchDto['info']> = {}
 ): MatchDto {
   return {
-    metadata: { matchId, participants: participants.map((p) => p.puuid) },
+    metadata: { matchId },
     info: {
-      gameMode: over.gameMode ?? 'CLASSIC',
       queueId: over.queueId ?? 420,
       gameDuration: over.gameDuration ?? 1800,
       participants
@@ -47,6 +45,10 @@ export const DDRAGON_SAMPLE = {
     Ashe: { key: '22', id: 'Ashe', name: 'Ashe', tags: ['Marksman', 'Support'] },
     Thresh: { key: '412', id: 'Thresh', name: 'Thresh', tags: ['Support', 'Fighter'] },
     LeeSin: { key: '64', id: 'LeeSin', name: 'Lee Sin', tags: ['Fighter', 'Assassin'] },
-    MissFortune: { key: '21', id: 'MissFortune', name: 'Miss Fortune', tags: ['Marksman'] }
+    MissFortune: { key: '21', id: 'MissFortune', name: 'Miss Fortune', tags: ['Marksman'] },
+    // Display name != internal key: exactly the case that broke portraits.
+    MasterYi: { key: '11', id: 'MasterYi', name: 'Master Yi', tags: ['Assassin', 'Fighter'] },
+    MonkeyKing: { key: '62', id: 'MonkeyKing', name: 'Wukong', tags: ['Fighter', 'Tank'] },
+    Sett: { key: '875', id: 'Sett', name: 'Sett', tags: ['Fighter', 'Tank'] }
   }
 }

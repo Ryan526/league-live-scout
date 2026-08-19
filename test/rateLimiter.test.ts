@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RateLimiter } from '../src/main/riot/rateLimiter'
+import { RateLimiter, parseLimitHeader } from '../src/main/riot/rateLimiter'
 
 /** A controllable fake clock + sleep so tests are deterministic and instant. */
 function fakeClock() {
@@ -129,5 +129,89 @@ describe('RateLimiter', () => {
     await clock.advance(10_000)
     expect(done).toEqual(['ran'])
     void limiter // silence unused
+  })
+})
+
+describe('parseLimitHeader', () => {
+  it('parses the limit:seconds pairs Riot sends', () => {
+    expect(parseLimitHeader('20:1,100:120')).toEqual([
+      { limit: 20, intervalMs: 1000 },
+      { limit: 100, intervalMs: 120_000 }
+    ])
+  })
+
+  it('ignores empty and malformed input', () => {
+    expect(parseLimitHeader(null)).toEqual([])
+    expect(parseLimitHeader('')).toEqual([])
+    expect(parseLimitHeader('nonsense')).toEqual([])
+    expect(parseLimitHeader('0:1,20:0,30:60')).toEqual([{ limit: 30, intervalMs: 60_000 }])
+  })
+})
+
+describe('applyLimitsFromHeader', () => {
+  it('adopts the budget Riot advertises', () => {
+    const limiter = new RateLimiter()
+    // A production key is roughly 300x a dev key; hardcoding the dev numbers
+    // throttled it for no reason.
+    limiter.applyLimitsFromHeader('500:10,30000:600')
+    expect(limiter.windows).toEqual([
+      { limit: 500, intervalMs: 10_000 },
+      { limit: 30000, intervalMs: 600_000 }
+    ])
+  })
+
+  it('carries recorded hits over into a matching window', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      appWindows: [{ limit: 2, intervalMs: 1000 }],
+      safety: 1,
+      now: clock.now,
+      sleep: clock.sleep
+    })
+    await limiter.schedule(async () => 'a')
+    await limiter.schedule(async () => 'b')
+    // Same interval, bigger allowance: the two requests we already made must
+    // still count against it.
+    limiter.applyLimitsFromHeader('10:1')
+    expect(limiter.windows).toEqual([{ limit: 10, intervalMs: 1000 }])
+
+    // Eight more fit inside the widened window without waiting.
+    let done = 0
+    for (let i = 0; i < 8; i++) void limiter.schedule(async () => done++)
+    await clock.advance(0)
+    expect(done).toBe(8)
+    // The ninth does not: 2 + 8 = 10 is the cap.
+    let ninth = false
+    void limiter.schedule(async () => (ninth = true))
+    await clock.advance(0)
+    expect(ninth).toBe(false)
+  })
+
+  it('leaves the windows alone for empty or identical headers', () => {
+    const limiter = new RateLimiter()
+    const before = limiter.windows
+    limiter.applyLimitsFromHeader(null)
+    limiter.applyLimitsFromHeader('20:1,100:120')
+    expect(limiter.windows).toEqual(before)
+  })
+})
+
+describe('clearQueue', () => {
+  it('rejects everything still waiting', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      appWindows: [{ limit: 1, intervalMs: 10_000 }],
+      safety: 1,
+      now: clock.now,
+      sleep: clock.sleep
+    })
+    await limiter.schedule(async () => 'first') // consumes the only slot
+    const queued = limiter.schedule(async () => 'never')
+    await clock.advance(0)
+    expect(limiter.status().queued).toBe(1)
+
+    limiter.clearQueue()
+    await expect(queued).rejects.toThrow('Rate limiter shut down')
+    expect(limiter.status().queued).toBe(0)
   })
 })

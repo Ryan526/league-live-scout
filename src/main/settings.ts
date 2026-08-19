@@ -5,6 +5,7 @@
 import { safeStorage } from 'electron'
 import Store from 'electron-store'
 import type { AppSettings, RegionConfig } from '@shared/types'
+import { LIVE_POLL_MAX_MS, LIVE_POLL_MIN_MS, findRegion } from '@shared/types'
 
 interface StoreSchema {
   /** Base64 of the safeStorage-encrypted API key. */
@@ -16,7 +17,7 @@ interface StoreSchema {
 }
 
 const DEFAULTS: StoreSchema = {
-  region: { platform: 'na1', regional: 'americas' },
+  region: { platform: 'na1', regional: 'americas', account: 'americas' },
   livePollMs: 5000
 }
 
@@ -28,7 +29,15 @@ export class Settings {
   }
 
   getRegion(): RegionConfig {
-    return this.store.get('region', DEFAULTS.region)
+    const stored = this.store.get('region', DEFAULTS.region)
+    // Settings written before account-v1 routing was split out have no
+    // `account`; fill it in from the region table so match-v5 can move to 'sea'
+    // without account lookups following it there.
+    if (!stored.account) {
+      const known = findRegion(stored.platform)
+      if (known) return { ...stored, regional: known.regional, account: known.account }
+    }
+    return stored
   }
 
   setRegion(region: RegionConfig): void {
@@ -36,7 +45,12 @@ export class Settings {
   }
 
   getLivePollMs(): number {
-    return this.store.get('livePollMs', DEFAULTS.livePollMs)
+    const raw = this.store.get('livePollMs', DEFAULTS.livePollMs)
+    return clampPollMs(raw)
+  }
+
+  setLivePollMs(ms: number): void {
+    this.store.set('livePollMs', clampPollMs(ms))
   }
 
   hasApiKey(): boolean {
@@ -86,4 +100,10 @@ export class Settings {
       livePollMs: this.getLivePollMs()
     }
   }
+}
+
+/** Keep the poll interval inside the range the UI offers. */
+function clampPollMs(ms: number): number {
+  if (!Number.isFinite(ms)) return DEFAULTS.livePollMs
+  return Math.min(LIVE_POLL_MAX_MS, Math.max(LIVE_POLL_MIN_MS, Math.round(ms)))
 }

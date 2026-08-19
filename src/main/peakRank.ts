@@ -16,6 +16,9 @@ interface PeakSchema {
   peaks: Record<string, RankEntry>
 }
 
+/** Roughly a thousand games' worth of opponents; oldest entries fall off. */
+const MAX_TRACKED_PLAYERS = 5000
+
 export class PeakRankStore {
   private store: Store<PeakSchema>
 
@@ -23,22 +26,34 @@ export class PeakRankStore {
     this.store = new Store<PeakSchema>({ name: 'peak-ranks', defaults: { peaks: {} } })
   }
 
-  getPeak(puuid: string): RankEntry | null {
-    return this.store.get('peaks')[puuid] ?? null
-  }
-
   /**
    * Record an observed rank; returns the (possibly updated) peak. A null/absent
-   * observation doesn't lower an existing peak.
+   * observation doesn't lower an existing peak, and only an actual improvement
+   * writes to disk.
    */
   observe(puuid: string, rank: RankEntry | null | undefined): RankEntry | null {
     const peaks = this.store.get('peaks')
     const current = peaks[puuid] ?? null
     if (rank && rankScore(rank) > rankScore(current)) {
       peaks[puuid] = rank
-      this.store.set('peaks', peaks)
+      this.store.set('peaks', trim(peaks))
       return rank
     }
     return current
   }
+
+  /** Forget every tracked peak (exposed in Settings). */
+  clear(): void {
+    this.store.set('peaks', {})
+  }
+}
+
+/** Bound the map so it can't grow for the lifetime of the install. Object key
+ *  order is insertion order for string keys, so this drops the oldest. */
+function trim(peaks: Record<string, RankEntry>): Record<string, RankEntry> {
+  const keys = Object.keys(peaks)
+  if (keys.length <= MAX_TRACKED_PLAYERS) return peaks
+  const trimmed: Record<string, RankEntry> = {}
+  for (const k of keys.slice(keys.length - MAX_TRACKED_PLAYERS)) trimmed[k] = peaks[k]
+  return trimmed
 }

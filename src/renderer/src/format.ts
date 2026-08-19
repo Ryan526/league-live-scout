@@ -25,10 +25,23 @@ export function rankWinRate(r: RankEntry | null | undefined): number | null {
   return total > 0 ? r.wins / total : null
 }
 
-/** Data Dragon square icon URL for a champion internal key (e.g. "Aatrox"). */
-export function championIcon(patch: string | undefined, championKey: string): string | null {
+/**
+ * Data Dragon square icon URL for a champion INTERNAL key (e.g. "MasterYi").
+ * Passing the Live Client display name ("Master Yi") 404s for every champion
+ * whose display name differs from its key, so callers must pass championKey.
+ */
+export function championIcon(
+  patch: string | undefined,
+  championKey: string | undefined
+): string | null {
   if (!patch || !championKey) return null
-  return `https://ddragon.leagueoflegends.com/cdn/${patch}/img/champion/${championKey}.png`
+  const file = encodeURIComponent(`${championKey}.png`)
+  return `https://ddragon.leagueoflegends.com/cdn/${patch}/img/champion/${file}`
+}
+
+/** Creep score per minute, e.g. "7.2". */
+export function csPerMin(v: number | null | undefined): string {
+  return v == null ? '—' : v.toFixed(1)
 }
 
 /** Short tier code for a colored rank chip, e.g. "G2". */

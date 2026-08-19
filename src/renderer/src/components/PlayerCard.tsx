@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react'
 import type { ScoutedPlayer } from '@shared/types'
 import { roleLabel, rankScore } from '@shared/types'
 import {
   championIcon,
+  csPerMin,
   kdaClass,
   num,
   pct,
@@ -18,14 +20,25 @@ interface Props {
   groupColor?: string
 }
 
+/** Below this many games, a champion win rate is noise, not a signal. */
+const SMALL_SAMPLE = 5
+
 export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
   const { live, stats, soloRank, peakSoloRank, mastery, loading } = player
-  const icon = championIcon(patch, live.championName)
+  // Data Dragon names its files by internal key ("MasterYi"), not by the
+  // display name the Live Client reports ("Master Yi").
+  const icon = championIcon(patch, live.championKey)
+  const [iconFailed, setIconFailed] = useState(false)
+  useEffect(() => setIconFailed(false), [icon])
+
   const solo = soloRank ?? null
   const soloWr = rankWinRate(solo)
   const peak = peakSoloRank ?? null
   // Only call out peak when it's meaningfully above the current rank.
   const belowPeak = peak != null && rankScore(peak) > rankScore(solo)
+  const inferredRole = player.roleSource === 'inferred'
+  const smallSample =
+    stats?.championWinRate != null && stats.championGames < SMALL_SAMPLE
 
   const cardStyle = groupColor
     ? { borderLeft: `3px solid ${groupColor}` }
@@ -35,8 +48,16 @@ export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
     <div className={`player-card ${live.isBot ? 'bot' : ''}`} style={cardStyle}>
       <div className="pc-top">
         <div className="pc-champ">
-          {icon ? (
-            <img src={icon} alt={live.championName} width={44} height={44} />
+          {icon && !iconFailed ? (
+            <img
+              src={icon}
+              alt={live.championName}
+              width={44}
+              height={44}
+              // A brand-new champion (or a Data Dragon lag) should degrade to
+              // initials, not a broken-image glyph.
+              onError={() => setIconFailed(true)}
+            />
           ) : (
             <div className="champ-fallback">{initials(live.championName)}</div>
           )}
@@ -55,8 +76,12 @@ export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
           <div className="pc-sub">
             <span className="champ-name">{live.championName || '—'}</span>
             {player.currentRole && player.currentRole !== 'UNKNOWN' && (
-              <span className="role-chip" title={roleTitle(player)}>
+              <span
+                className={`role-chip ${inferredRole ? 'inferred' : ''}`}
+                title={roleTitle(player)}
+              >
                 {roleLabel(player.currentRole)}
+                {inferredRole && <span className="role-guess">?</span>}
                 {player.offRole && <span className="offrole" title="Off their main role">off-role</span>}
               </span>
             )}
@@ -64,8 +89,8 @@ export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
         </div>
 
         <div className="pc-rank">
-          <span className={`rank-chip ${tierClass(solo)}`} title="Ranked Solo/Duo">
-            {rankLabel(solo)}
+          <span className={`rank-chip ${tierClass(solo)}`} title={rankTitle(player)}>
+            {player.noRankData && !solo ? 'No ranked data' : rankLabel(solo)}
           </span>
           {soloWr != null && solo && (
             <span className={`rank-wr ${wrClass(soloWr)}`}>
@@ -95,21 +120,23 @@ export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
                   ? 'no games'
                   : '—'
           }
-          cls={wrClass(stats?.championWinRate)}
+          sub={smallSample ? 'small sample' : undefined}
+          cls={smallSample ? '' : wrClass(stats?.championWinRate)}
         />
         <Stat
           label="Ranked KDA"
-          value={stats?.avgKda != null ? `${num(stats.avgKda, 2)}` : loading.matches === 'loading' ? '…' : '—'}
+          value={stats?.kdaRatio != null ? `${num(stats.kdaRatio, 2)}` : loading.matches === 'loading' ? '…' : '—'}
           sub={
             stats && stats.sampleSize > 0
               ? `${num(stats.avgKills)}/${num(stats.avgDeaths)}/${num(stats.avgAssists)}`
               : undefined
           }
-          cls={kdaClass(stats?.avgKda)}
+          cls={kdaClass(stats?.kdaRatio)}
         />
         <Stat
           label="Main role"
           value={stats?.mainRole && stats.mainRole !== 'UNKNOWN' ? roleLabel(stats.mainRole) : '—'}
+          sub={stats && stats.sampleSize > 0 ? `${csPerMin(stats.avgCsPerMin)} cs/m` : undefined}
         />
         <Stat
           label="Premade"
@@ -130,10 +157,11 @@ export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
         )}
         {live.scores && (
           <div className="live-score" title="Live scoreboard">
-            {live.scores.kills}/{live.scores.deaths}/{live.scores.assists} · {live.scores.creepScore} CS
+            {live.scores.kills}/{live.scores.deaths}/{live.scores.assists} ·{' '}
+            {live.scores.creepScore} CS · {Math.round(live.scores.wardScore)} vision
           </div>
         )}
-        {player.error && loading.identity === 'error' && (
+        {player.error && (
           <div className="pc-error" title={player.error}>
             {player.error}
           </div>
@@ -169,7 +197,20 @@ function roleTitle(p: ScoutedPlayer): string {
   const cur = p.currentRole && p.currentRole !== 'UNKNOWN' ? roleLabel(p.currentRole) : 'unknown'
   const main =
     p.stats?.mainRole && p.stats.mainRole !== 'UNKNOWN' ? roleLabel(p.stats.mainRole) : 'unknown'
-  return `Current role: ${cur} (inferred for enemies) · Main: ${main}`
+  const source =
+    p.roleSource === 'live'
+      ? 'reported by the game'
+      : p.roleSource === 'champselect'
+        ? 'from champ select'
+        : 'inferred from spells, champion and ranked history'
+  return `Current role: ${cur} (${source}) · Main: ${main}`
+}
+
+function rankTitle(p: ScoutedPlayer): string {
+  if (p.noRankData && !p.soloRank) {
+    return 'Riot returned no ranked entries: either genuinely unranked, or this player is not on the configured region.'
+  }
+  return 'Ranked Solo/Duo'
 }
 
 function initials(name: string): string {

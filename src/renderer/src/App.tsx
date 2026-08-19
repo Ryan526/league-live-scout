@@ -35,13 +35,27 @@ export default function App(): JSX.Element {
   }, [setSnapshot, setSettings, setRate, pushLog, setSettingsOpen])
 
   const hasPlayers = (snapshot?.players.length ?? 0) > 0
+  const keyRejected = Boolean(snapshot?.apiKeyRejected)
 
-  // Grow/shrink the window to fit whatever is currently on screen.
-  useAutoFit([snapshot, settingsOpen])
+  // Grow/shrink the window to fit whatever is currently on screen. The key is a
+  // stable primitive so the effect doesn't rebuild on every snapshot push.
+  useAutoFit(
+    `${settingsOpen}|${keyRejected}|${snapshot?.players.length ?? 0}|${snapshot?.phase ?? ''}`
+  )
 
   return (
     <div className="app">
       <StatusBar />
+      {keyRejected && !settingsOpen && (
+        <div className="key-banner">
+          <span>
+            Riot rejected your API key (401/403). Development keys expire every 24 hours.
+          </span>
+          <button className="btn small" onClick={() => setSettingsOpen(true)}>
+            Paste a fresh key
+          </button>
+        </div>
+      )}
       <main className="content">
         {settingsOpen && <Settings />}
         {!settingsOpen && hasPlayers && <Scoreboard />}

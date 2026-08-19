@@ -17,6 +17,39 @@ export type TeamId = 'ORDER' | 'CHAOS' | 'UNKNOWN'
 /** Canonical role names used throughout the app. */
 export type Role = 'TOP' | 'JUNGLE' | 'MIDDLE' | 'BOTTOM' | 'UTILITY' | 'UNKNOWN'
 
+/**
+ * The single canonical lane ordering: Top -> Jungle -> Mid -> Bot -> Support,
+ * with UNKNOWN last. Everything that orders, iterates or ranks roles derives
+ * from this array, so the scoreboard, the role assigner and the stats
+ * aggregator can never disagree about what "role order" means.
+ */
+export const ROLE_ORDER: Role[] = [
+  'TOP',
+  'JUNGLE',
+  'MIDDLE',
+  'BOTTOM',
+  'UTILITY',
+  'UNKNOWN'
+]
+
+/** The five real Summoner's Rift lanes, in canonical order (no UNKNOWN). */
+export const LANES: Role[] = ROLE_ORDER.filter((r) => r !== 'UNKNOWN')
+
+/** Sort index for a role; unknown/undefined sorts last. */
+export function roleRank(role: Role | undefined): number {
+  const i = ROLE_ORDER.indexOf(role ?? 'UNKNOWN')
+  return i < 0 ? ROLE_ORDER.length : i
+}
+
+/** Where a player's `currentRole` came from - fact vs. guess. */
+export type RoleSource =
+  /** The Live Client's own per-player `position` field (exact, both teams). */
+  | 'live'
+  /** Assigned position read from the LCU champ-select session (own team). */
+  | 'champselect'
+  /** Our scored guess from spells, champion tags and ranked history. */
+  | 'inferred'
+
 /** A player as first observed from Live Client Data (identity + champ), before
  *  Riot API enrichment. */
 export interface LivePlayer {
@@ -24,10 +57,16 @@ export interface LivePlayer {
   riotId: string
   gameName: string
   tagLine: string
+  /** Champion name as the Live Client reports it, e.g. "Master Yi". */
   championName: string
   /** Data Dragon numeric champion id, resolved from championName. */
   championId?: number
+  /** Data Dragon internal key, e.g. "MasterYi". This - not championName - is
+   *  what the CDN icon URLs are built from. */
+  championKey?: string
   team: TeamId
+  /** Assigned lane as reported by the Live Client. UNKNOWN in modes/queues
+   *  without assigned lanes (and on payloads that omit the field). */
   position?: Role
   summonerSpells: string[]
   isBot: boolean
@@ -60,11 +99,14 @@ export interface MatchDerivedStats {
   championWinRate: number | null
   championGames: number
   championWins: number
-  /** Average KDA ratio over the sample: (K+A)/max(D,1). */
-  avgKda: number | null
+  /** Aggregate KDA over the whole sample: (sum K + sum A) / max(1, sum D).
+   *  A pooled ratio, NOT the mean of each game's individual KDA. */
+  kdaRatio: number | null
   avgKills: number
   avgDeaths: number
   avgAssists: number
+  /** Mean creep score per minute across the sample, or null with no sample. */
+  avgCsPerMin: number | null
   /** Most common teamPosition across the sample = inferred main role. */
   mainRole: Role
   /** Distribution of positions played, for tooltips. */
@@ -85,20 +127,26 @@ export interface ScoutedPlayer {
   /** Solo/Duo ranked entry, when available. */
   soloRank?: RankEntry | null
   flexRank?: RankEntry | null
+  /** True when league-v4 returned no entries at all. That usually means
+   *  genuinely unranked, but it is also what a wrong-platform lookup returns,
+   *  so the UI must not claim "Unranked" with confidence. */
+  noRankData?: boolean
   /** Highest Solo/Duo rank ever observed for this player by this app (tracked
-   *  locally over time — the Riot API exposes no all-time peak). */
+   *  locally over time - the Riot API exposes no all-time peak). */
   peakSoloRank?: RankEntry | null
   mastery?: MasteryInfo | null
   stats?: MatchDerivedStats | null
-  /** Current role for this game: exact for own team (from LCU), inferred for
-   *  enemies (smite/spells/champion tags). */
+  /** Current role for this game. */
   currentRole?: Role
+  /** Provenance of `currentRole`, so the UI can mark a guess as a guess. */
+  roleSource?: RoleSource
   /** True when currentRole differs from the derived mainRole. */
   offRole?: boolean
   /** Premade group id within this player's team (players sharing a value are
    *  queued together). Undefined/solo when the player has no detected premade. */
   premadeGroup?: number
-  /** Human label for the premade status, e.g. "Duo", "Trio", "Solo". */
+  /** Human label for the premade status, e.g. "Duo", "Trio", "Solo", or
+   *  "Unknown" when we have no match history to compare. */
   premadeLabel?: string
   /** Per-field load status so the UI can show spinners/errors granularly. */
   loading: LoadState
@@ -125,6 +173,8 @@ export interface ScoutSnapshot {
   players: ScoutedPlayer[]
   /** Data Dragon patch version in use. */
   patch?: string
+  /** Set when Riot answered 401/403 - almost always an expired dev key. */
+  apiKeyRejected?: boolean
   updatedAt: number
 }
 
@@ -136,11 +186,65 @@ export interface AppSettings {
   livePollMs: number
 }
 
+/** Allowed bounds for the Live Client poll interval, shared by UI and main. */
+export const LIVE_POLL_MIN_MS = 1000
+export const LIVE_POLL_MAX_MS = 30_000
+
 export interface RegionConfig {
-  /** Platform routing value, e.g. 'na1'. */
+  /** Platform routing value, e.g. 'na1'. Used by league-v4 and mastery-v4. */
   platform: string
-  /** Regional routing value, e.g. 'americas'. */
+  /** Regional routing value for match-v5: 'americas' | 'europe' | 'asia' |
+   *  'sea'. OCE, VN and TW live on 'sea'. */
   regional: string
+  /** Regional routing value for account-v1, which does NOT serve 'sea'. Older
+   *  stored settings omit this; `accountRoute()` fills it in. */
+  account?: string
+}
+
+export interface RegionOption extends RegionConfig {
+  label: string
+  account: string
+}
+
+/**
+ * Every platform we support, with the match-v5 and account-v1 routes kept
+ * separate because they genuinely differ for the SEA cluster: match-v5 serves
+ * 'sea' while account-v1 does not, so OCE/VN/TW must split the two.
+ */
+export const REGIONS: RegionOption[] = [
+  { label: 'North America (NA)', platform: 'na1', regional: 'americas', account: 'americas' },
+  { label: 'Brazil (BR)', platform: 'br1', regional: 'americas', account: 'americas' },
+  { label: 'Latin America North (LAN)', platform: 'la1', regional: 'americas', account: 'americas' },
+  { label: 'Latin America South (LAS)', platform: 'la2', regional: 'americas', account: 'americas' },
+  { label: 'EU West (EUW)', platform: 'euw1', regional: 'europe', account: 'europe' },
+  { label: 'EU Nordic & East (EUNE)', platform: 'eun1', regional: 'europe', account: 'europe' },
+  { label: 'Turkey (TR)', platform: 'tr1', regional: 'europe', account: 'europe' },
+  { label: 'Russia (RU)', platform: 'ru', regional: 'europe', account: 'europe' },
+  { label: 'Middle East (ME)', platform: 'me1', regional: 'europe', account: 'europe' },
+  { label: 'Korea (KR)', platform: 'kr', regional: 'asia', account: 'asia' },
+  { label: 'Japan (JP)', platform: 'jp1', regional: 'asia', account: 'asia' },
+  { label: 'Oceania (OCE)', platform: 'oc1', regional: 'sea', account: 'americas' },
+  { label: 'Vietnam (VN)', platform: 'vn2', regional: 'sea', account: 'asia' },
+  { label: 'Taiwan (TW)', platform: 'tw2', regional: 'sea', account: 'asia' },
+  { label: 'Singapore (SG)', platform: 'sg2', regional: 'sea', account: 'asia' },
+  { label: 'Philippines (PH)', platform: 'ph2', regional: 'sea', account: 'asia' },
+  { label: 'Thailand (TH)', platform: 'th2', regional: 'sea', account: 'asia' }
+]
+
+/** Look up a stored region in the table (by platform), if we know it. */
+export function findRegion(platform: string): RegionOption | undefined {
+  return REGIONS.find((r) => r.platform === platform)
+}
+
+/**
+ * account-v1 routing value for a region. Prefers an explicit `account`, then
+ * the region table, then a safe remap of 'sea' (which account-v1 rejects).
+ */
+export function accountRoute(region: RegionConfig): string {
+  if (region.account) return region.account
+  const known = findRegion(region.platform)
+  if (known) return known.account
+  return region.regional === 'sea' ? 'asia' : region.regional
 }
 
 export interface RateLimiterStatus {
@@ -180,17 +284,6 @@ export function rankScore(r: RankEntry | null | undefined): number {
   return tierIdx * 10000 + divIdx * 1000 + (r.leaguePoints ?? 0)
 }
 
-/** Return whichever of two ranks is higher (by rankScore). */
-export function higherRank(
-  a: RankEntry | null | undefined,
-  b: RankEntry | null | undefined
-): RankEntry | null {
-  const sa = rankScore(a)
-  const sb = rankScore(b)
-  if (sa < 0 && sb < 0) return null
-  return sb > sa ? b! : a ?? b ?? null
-}
-
 /** Ranked queue ids used to filter match history to ranked play only. */
 export const RANKED_QUEUE_IDS = [420, 440] // 420 = Solo/Duo, 440 = Flex
 
@@ -221,7 +314,9 @@ export const IPC = {
   setApiKey: 'settings:setApiKey',
   clearApiKey: 'settings:clearApiKey',
   setRegion: 'settings:setRegion',
+  setLivePollMs: 'settings:setLivePollMs',
   testApiKey: 'settings:testApiKey',
+  clearPeakRanks: 'settings:clearPeakRanks',
   rescout: 'scout:rescout',
   // renderer -> main (send, fire-and-forget)
   resizeWindow: 'window:resizeToContent',

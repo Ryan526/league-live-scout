@@ -1,14 +1,16 @@
 // A central rate-limited request queue for the Riot API.
 //
-// A personal (development) key is limited to roughly:
+// We start on the conservative *development*-key budget:
 //   - 20 requests / 1 second
 //   - 100 requests / 120 seconds
-// plus per-method limits returned in response headers. We honor the app-wide
-// windows proactively and back off on 429 using the Retry-After header.
+// but Riot tells us the real budget on every response via X-App-Rate-Limit, so
+// the first reply reconfigures the windows. A production key is ~300x larger
+// than a dev key, and hardcoding the dev numbers meant a production key spent
+// four minutes populating a lobby it could have filled in seconds.
 //
-// The limiter is deliberately conservative and header-aware: whenever Riot
-// returns X-App-Rate-Limit-Count we reconcile our local counters so we never
-// drift past the real budget.
+// X-App-Rate-Limit-Count carries the authoritative usage, which we reconcile
+// against our local counters so we never drift past the real budget, and 429s
+// force a global backoff via Retry-After.
 
 export interface RateWindow {
   /** Max requests permitted within the window. */
@@ -30,7 +32,7 @@ export interface RateLimiterOptions {
 
 interface QueueItem {
   run: () => void
-  weight: number
+  cancel: (reason: Error) => void
 }
 
 const DEFAULT_APP_WINDOWS: RateWindow[] = [
@@ -39,13 +41,13 @@ const DEFAULT_APP_WINDOWS: RateWindow[] = [
 ]
 
 export class RateLimiter {
-  private readonly appWindows: RateWindow[]
+  private appWindows: RateWindow[]
   private readonly safety: number
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
 
   /** Timestamps of recent requests, one array per window. */
-  private readonly hits: number[][]
+  private hits: number[][]
   private readonly queue: QueueItem[] = []
   private draining = false
   private inFlight = 0
@@ -69,11 +71,16 @@ export class RateLimiter {
     }
   }
 
+  /** The windows currently in force, for tests and diagnostics. */
+  get windows(): RateWindow[] {
+    return this.appWindows.map((w) => ({ ...w }))
+  }
+
   /** Schedule work; resolves with the result once a slot is available. */
   schedule<T>(fn: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({
-        weight: 1,
+        cancel: reject,
         run: () => {
           this.inFlight++
           fn()
@@ -87,15 +94,52 @@ export class RateLimiter {
     })
   }
 
+  /**
+   * Drop everything still queued. Called on shutdown: after a game ends there
+   * can be well over a hundred queued match lookups that would otherwise keep
+   * firing for minutes against a process that is trying to exit.
+   */
+  clearQueue(): void {
+    const dropped = this.queue.splice(0, this.queue.length)
+    for (const item of dropped) item.cancel(new Error('Rate limiter shut down'))
+  }
+
   /** Force a backoff window, e.g. after a 429. `seconds` from Retry-After. */
   applyRetryAfter(seconds: number): void {
+    if (!Number.isFinite(seconds)) return
     const until = this.now() + Math.max(0, seconds) * 1000
     if (until > this.retryAfterUntil) this.retryAfterUntil = until
   }
 
   /**
+   * Adopt the app-wide limits Riot advertises in X-App-Rate-Limit, formatted
+   * like "20:1,100:120" (limit:seconds). Existing hit timestamps are carried
+   * over into matching windows so we never forget requests we already made.
+   */
+  applyLimitsFromHeader(limitHeader: string | null | undefined): void {
+    const parsed = parseLimitHeader(limitHeader)
+    if (parsed.length === 0) return
+    const unchanged =
+      parsed.length === this.appWindows.length &&
+      parsed.every(
+        (w, i) =>
+          w.limit === this.appWindows[i].limit &&
+          w.intervalMs === this.appWindows[i].intervalMs
+      )
+    if (unchanged) return
+
+    const previous = this.appWindows
+    const previousHits = this.hits
+    this.appWindows = parsed
+    this.hits = parsed.map((w) => {
+      const idx = previous.findIndex((p) => p.intervalMs === w.intervalMs)
+      return idx >= 0 ? [...previousHits[idx]] : []
+    })
+  }
+
+  /**
    * Reconcile our local counters against Riot's authoritative count header,
-   * formatted like "count:limit,count:limit" (X-App-Rate-Limit-Count).
+   * formatted like "count:interval,count:interval" (X-App-Rate-Limit-Count).
    * If Riot thinks we've used more than we recorded, add synthetic hits so we
    * throttle sooner.
    */
@@ -164,7 +208,8 @@ export class RateLimiter {
           await this.sleep(wait)
           continue
         }
-        const item = this.queue.shift()!
+        const item = this.queue.shift()
+        if (!item) break
         this.recordHit()
         item.run()
       }
@@ -172,4 +217,19 @@ export class RateLimiter {
       this.draining = false
     }
   }
+}
+
+/** Parse "20:1,100:120" into rate windows, ignoring malformed segments. */
+export function parseLimitHeader(header: string | null | undefined): RateWindow[] {
+  if (!header) return []
+  const windows: RateWindow[] = []
+  for (const part of header.split(',')) {
+    const [limitStr, secondsStr] = part.trim().split(':')
+    const limit = Number(limitStr)
+    const seconds = Number(secondsStr)
+    if (!Number.isFinite(limit) || !Number.isFinite(seconds)) continue
+    if (limit <= 0 || seconds <= 0) continue
+    windows.push({ limit, intervalMs: seconds * 1000 })
+  }
+  return windows
 }

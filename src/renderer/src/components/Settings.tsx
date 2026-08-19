@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { useStore } from '../store'
+import {
+  LIVE_POLL_MAX_MS,
+  LIVE_POLL_MIN_MS,
+  REGIONS,
+  type RegionOption
+} from '@shared/types'
 
-const REGIONS: Array<{ label: string; platform: string; regional: string }> = [
-  { label: 'North America (NA)', platform: 'na1', regional: 'americas' },
-  { label: 'EU West (EUW)', platform: 'euw1', regional: 'europe' },
-  { label: 'EU Nordic & East (EUNE)', platform: 'eun1', regional: 'europe' },
-  { label: 'Korea (KR)', platform: 'kr', regional: 'asia' },
-  { label: 'Oceania (OCE)', platform: 'oc1', regional: 'americas' },
-  { label: 'Brazil (BR)', platform: 'br1', regional: 'americas' }
-]
+/** Poll intervals offered in the UI, in milliseconds. */
+const POLL_CHOICES = [2000, 5000, 10_000].filter(
+  (ms) => ms >= LIVE_POLL_MIN_MS && ms <= LIVE_POLL_MAX_MS
+)
 
 export function Settings(): JSX.Element {
   const settings = useStore((s) => s.settings)
@@ -22,6 +24,10 @@ export function Settings(): JSX.Element {
 
   const region = settings?.region
 
+  function fail(e: unknown): void {
+    setTestMsg({ ok: false, text: e instanceof Error ? e.message : String(e) })
+  }
+
   async function saveKey(): Promise<void> {
     if (!keyInput.trim()) return
     setBusy(true)
@@ -29,17 +35,22 @@ export function Settings(): JSX.Element {
       const next = await window.scout.setApiKey(keyInput.trim())
       setSettings(next)
       setKeyInput('')
-      const result = await window.scout.testApiKey()
-      setTestMsg({ ok: result.ok, text: result.message })
+      setTestMsg({ ok: true, text: 'Key saved.' })
+    } catch (e) {
+      // Without this the user is told nothing and assumes the key was stored.
+      fail(e)
     } finally {
       setBusy(false)
     }
   }
 
   async function clearKey(): Promise<void> {
-    const next = await window.scout.clearApiKey()
-    setSettings(next)
-    setTestMsg(null)
+    try {
+      setSettings(await window.scout.clearApiKey())
+      setTestMsg(null)
+    } catch (e) {
+      fail(e)
+    }
   }
 
   async function test(): Promise<void> {
@@ -47,15 +58,49 @@ export function Settings(): JSX.Element {
     try {
       const result = await window.scout.testApiKey()
       setTestMsg({ ok: result.ok, text: result.message })
+    } catch (e) {
+      fail(e)
     } finally {
       setBusy(false)
     }
   }
 
-  async function changeRegion(platform: string, regional: string): Promise<void> {
-    const next = await window.scout.setRegion({ platform, regional })
-    setSettings(next)
+  async function changeRegion(platform: string): Promise<void> {
+    const option = REGIONS.find((r) => r.platform === platform)
+    if (!option) return
+    try {
+      setSettings(
+        await window.scout.setRegion({
+          platform: option.platform,
+          regional: option.regional,
+          account: option.account
+        })
+      )
+    } catch (e) {
+      fail(e)
+    }
   }
+
+  async function changePollMs(ms: number): Promise<void> {
+    try {
+      setSettings(await window.scout.setLivePollMs(ms))
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  async function clearPeaks(): Promise<void> {
+    try {
+      await window.scout.clearPeakRanks()
+      setTestMsg({ ok: true, text: 'Peak rank history cleared.' })
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  // An unrecognized stored platform used to silently display "NA" while
+  // operating on something else; show it explicitly instead.
+  const known: RegionOption | undefined = REGIONS.find((r) => r.platform === region?.platform)
 
   return (
     <div className="settings">
@@ -108,18 +153,49 @@ export function Settings(): JSX.Element {
       <section className="settings-section">
         <h2>Region</h2>
         <select
-          value={region ? `${region.platform}|${region.regional}` : 'na1|americas'}
-          onChange={(e) => {
-            const [platform, regional] = e.target.value.split('|')
-            void changeRegion(platform, regional)
-          }}
+          value={known?.platform ?? ''}
+          onChange={(e) => void changeRegion(e.target.value)}
         >
+          {!known && (
+            <option value="">
+              {region ? `Unrecognized (${region.platform}) — pick a region` : 'Pick a region'}
+            </option>
+          )}
           {REGIONS.map((r) => (
-            <option key={r.platform} value={`${r.platform}|${r.regional}`}>
+            <option key={r.platform} value={r.platform}>
               {r.label}
             </option>
           ))}
         </select>
+      </section>
+
+      <section className="settings-section">
+        <h2>In-game refresh</h2>
+        <p className="muted">
+          How often the live scoreboard (K/D/A, CS) is re-read from the game client. This is a
+          local call and costs no Riot API quota.
+        </p>
+        <select
+          value={settings?.livePollMs ?? 5000}
+          onChange={(e) => void changePollMs(Number(e.target.value))}
+        >
+          {POLL_CHOICES.map((ms) => (
+            <option key={ms} value={ms}>
+              Every {ms / 1000}s
+            </option>
+          ))}
+        </select>
+      </section>
+
+      <section className="settings-section">
+        <h2>Peak rank history</h2>
+        <p className="muted">
+          Peak ranks are observed by this app over time and stored locally. Clearing forgets every
+          player seen so far.
+        </p>
+        <button className="btn small danger" onClick={() => void clearPeaks()}>
+          Clear peak ranks
+        </button>
       </section>
 
       <section className="settings-section">

@@ -2,9 +2,18 @@
 // I/O so they can be unit-tested against recorded fixtures.
 
 import type { MatchDerivedStats, Role } from '@shared/types'
+import { LANES } from '@shared/types'
 import type { MatchDto, MatchParticipantDto } from './client'
 
-export const ROLES: Role[] = ['TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'UTILITY']
+/** The five real lanes, in canonical order. Re-exported for convenience. */
+export const ROLES: Role[] = LANES
+
+/**
+ * Games shorter than this are dropped from the aggregate. Riot's own remake
+ * window is about 180s; we use five minutes so early surrenders and abandoned
+ * games don't drag a player's averages around either.
+ */
+export const MIN_COUNTED_GAME_SEC = 300
 
 /** Normalize the various position strings Riot returns to our Role union. */
 export function normalizeRole(pos: string | undefined): Role {
@@ -39,7 +48,7 @@ export function findParticipant(
 export interface DeriveOptions {
   /** Numeric champion id of the currently-picked champion, for win-rate filter. */
   championId?: number
-  /** Only count "real" games (exclude very short remakes < 5 min). */
+  /** Only count "real" games; defaults to MIN_COUNTED_GAME_SEC. */
   minDurationSec?: number
   /** When set, only include matches whose queueId is in this list (e.g. ranked
    *  queues). Defensive: match ids are already fetched with type=ranked. */
@@ -55,7 +64,7 @@ export function deriveStats(
   matches: MatchDto[],
   opts: DeriveOptions = {}
 ): MatchDerivedStats {
-  const minDuration = opts.minDurationSec ?? 300
+  const minDuration = opts.minDurationSec ?? MIN_COUNTED_GAME_SEC
   const queueFilter = opts.queueIds ? new Set(opts.queueIds) : null
   const roleCounts: Partial<Record<Role, number>> = {}
   const recentForm: Array<'W' | 'L'> = []
@@ -64,6 +73,8 @@ export function deriveStats(
   let sumK = 0
   let sumD = 0
   let sumA = 0
+  let sumCs = 0
+  let sumMinutes = 0
   let champGames = 0
   let champWins = 0
 
@@ -80,6 +91,10 @@ export function deriveStats(
     sumK += p.kills
     sumD += p.deaths
     sumA += p.assists
+    if (match.info.gameDuration > 0) {
+      sumCs += (p.totalMinionsKilled ?? 0) + (p.neutralMinionsKilled ?? 0)
+      sumMinutes += match.info.gameDuration / 60
+    }
 
     const role = normalizeRole(p.teamPosition || p.individualPosition)
     if (role !== 'UNKNOWN') roleCounts[role] = (roleCounts[role] ?? 0) + 1
@@ -101,17 +116,22 @@ export function deriveStats(
     championWinRate: champGames > 0 ? champWins / champGames : null,
     championGames: champGames,
     championWins: champWins,
-    avgKda: kdaRatio,
+    kdaRatio,
     avgKills: sampleSize > 0 ? sumK / sampleSize : 0,
     avgDeaths: sampleSize > 0 ? sumD / sampleSize : 0,
     avgAssists: sampleSize > 0 ? sumA / sampleSize : 0,
+    avgCsPerMin: sumMinutes > 0 ? sumCs / sumMinutes : null,
     mainRole: modeRole(roleCounts),
     roleCounts,
     recentForm: recentForm.slice(0, 10)
   }
 }
 
-/** Most-played role, or UNKNOWN if none recorded. */
+/**
+ * Most-played role, or UNKNOWN if none recorded. Ties break towards the earlier
+ * lane in canonical order, so an exact 3/3 top/mid split reports Top. Callers
+ * that care about confidence should look at `roleCounts` themselves.
+ */
 export function modeRole(roleCounts: Partial<Record<Role, number>>): Role {
   let best: Role = 'UNKNOWN'
   let bestN = 0
@@ -123,10 +143,4 @@ export function modeRole(roleCounts: Partial<Record<Role, number>>): Role {
     }
   }
   return best
-}
-
-/** Overall ranked win rate from wins/losses. */
-export function winRate(wins: number, losses: number): number | null {
-  const total = wins + losses
-  return total > 0 ? wins / total : null
 }

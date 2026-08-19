@@ -8,6 +8,15 @@ interface Props {
   patch?: string
 }
 
+/**
+ * Stable identity for React. The Live Client swaps between a bare game name
+ * and a full Riot ID mid-load, so the PUUID (once known) and then the champion
+ * are the only things that don't change under us.
+ */
+function playerKey(p: ScoutedPlayer): string {
+  return p.puuid ?? `${p.live.team}:${p.live.championName || p.live.riotId}`
+}
+
 /** Distinct accent colors for premade groups within a team. */
 const GROUP_COLORS = ['#f0b429', '#4fd1c5', '#f56565', '#b794f4']
 
@@ -34,7 +43,7 @@ export function TeamPanel({ title, side, players, patch }: Props): JSX.Element {
               : undefined
           return (
             <PlayerCard
-              key={p.live.riotId || `${p.live.gameName}-${p.live.championName}`}
+              key={playerKey(p)}
               player={p}
               patch={patch}
               groupColor={groupColor}

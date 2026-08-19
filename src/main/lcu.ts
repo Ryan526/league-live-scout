@@ -38,7 +38,6 @@ export interface ChampSelectPlayer {
   championId: number
   /** Assigned position from champ select, e.g. 'top','jungle','middle', etc. */
   assignedPosition: Role
-  cellId: number
   puuid?: string
 }
 
@@ -86,10 +85,6 @@ export class Lcu extends EventEmitter {
   private connectTimer: NodeJS.Timeout | null = null
   private stopped = false
   private currentPhase: GamePhase = 'Idle'
-
-  get phase(): GamePhase {
-    return this.currentPhase
-  }
 
   get isConnected(): boolean {
     return this.credentials != null && this.ws != null
@@ -151,39 +146,58 @@ export class Lcu extends EventEmitter {
       return
     }
 
-    this.emit('connected')
+    // A listener that throws here would escape before the websocket
+    // subscriptions and the reconnect wiring below were ever installed,
+    // leaving the LCU permanently disconnected with no retry scheduled.
+    try {
+      this.emit('connected')
 
-    // Subscribe to gameflow phase changes.
-    this.ws.subscribe('/lol-gameflow/v1/session', (data: unknown) => {
-      const phaseRaw = (data as { phase?: string } | undefined)?.phase
-      if (phaseRaw) this.handlePhase(phaseRaw)
-    })
+      // Subscribe to gameflow phase changes.
+      this.ws.subscribe('/lol-gameflow/v1/session', (data: unknown) => {
+        const phaseRaw = (data as { phase?: string } | undefined)?.phase
+        if (phaseRaw) this.handlePhase(phaseRaw)
+      })
 
-    // Subscribe to champ-select updates (our own team only).
-    this.ws.subscribe('/lol-champ-select/v1/session', (data: unknown) => {
-      const players = parseChampSelect(data)
-      if (players.length) this.emit('champSelect', players)
-    })
+      // Subscribe to champ-select updates (our own team only).
+      this.ws.subscribe('/lol-champ-select/v1/session', (data: unknown) => {
+        try {
+          const players = parseChampSelect(data)
+          if (players.length) this.emit('champSelect', players)
+        } catch (e) {
+          console.error('[lcu] champSelect listener threw:', e)
+        }
+      })
 
-    this.ws.on('close', () => {
+      this.ws.on('close', () => {
+        this.teardownWs()
+        this.credentials = null
+        this.emit('disconnected')
+        this.scheduleReconnect()
+      })
+      this.ws.on('error', () => {
+        // 'close' will follow; nothing to do here.
+      })
+
+      // Prime current phase immediately (websocket only pushes on change).
+      await this.refreshPhase()
+    } catch (e) {
+      console.error('[lcu] connect handling failed:', e)
       this.teardownWs()
       this.credentials = null
-      this.emit('disconnected')
       this.scheduleReconnect()
-    })
-    this.ws.on('error', () => {
-      // 'close' will follow; nothing to do here.
-    })
-
-    // Prime current phase immediately (websocket only pushes on change).
-    await this.refreshPhase()
+    }
   }
 
   private handlePhase(raw: string): void {
     const mapped = mapPhase(raw)
-    if (mapped !== this.currentPhase) {
-      this.currentPhase = mapped
+    if (mapped === this.currentPhase) return
+    this.currentPhase = mapped
+    // Emitted from a websocket callback: a throwing listener must not unwind
+    // into league-connect and tear the socket down.
+    try {
       this.emit('phase', mapped, raw)
+    } catch (e) {
+      console.error('[lcu] phase listener threw:', e)
     }
   }
 
@@ -225,7 +239,6 @@ function parseChampSelect(data: unknown): ChampSelectPlayer[] {
           gameName?: string
           championId?: number
           assignedPosition?: string
-          cellId?: number
           puuid?: string
         }>
       }
@@ -235,7 +248,6 @@ function parseChampSelect(data: unknown): ChampSelectPlayer[] {
     summonerName: m.gameName || m.summonerName,
     championId: m.championId ?? 0,
     assignedPosition: normalizeRole(m.assignedPosition),
-    cellId: m.cellId ?? 0,
     puuid: m.puuid
   }))
 }

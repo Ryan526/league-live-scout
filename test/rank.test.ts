@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { rankScore, higherRank, type RankEntry } from '../src/shared/types'
+import { rankScore, type RankEntry } from '../src/shared/types'
 
 function r(tier: string, rank: string, lp: number): RankEntry {
   return { queueType: 'RANKED_SOLO_5x5', tier, rank, leaguePoints: lp, wins: 0, losses: 0 }
@@ -29,23 +29,3 @@ describe('rankScore', () => {
   })
 })
 
-describe('higherRank', () => {
-  it('returns the better of two ranks', () => {
-    expect(higherRank(r('GOLD', 'II', 50), r('PLATINUM', 'IV', 0))?.tier).toBe('PLATINUM')
-    expect(higherRank(r('DIAMOND', 'I', 0), r('GOLD', 'I', 99))?.tier).toBe('DIAMOND')
-  })
-
-  it('keeps the existing peak when the new observation is lower', () => {
-    const peak = r('DIAMOND', 'II', 40)
-    expect(higherRank(peak, r('PLATINUM', 'I', 10))).toBe(peak)
-  })
-
-  it('returns null when both are unranked', () => {
-    expect(higherRank(null, undefined)).toBeNull()
-  })
-
-  it('picks whichever side is ranked', () => {
-    expect(higherRank(null, r('BRONZE', 'IV', 0))?.tier).toBe('BRONZE')
-    expect(higherRank(r('BRONZE', 'IV', 0), null)?.tier).toBe('BRONZE')
-  })
-})

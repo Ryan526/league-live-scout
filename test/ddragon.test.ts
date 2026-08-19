@@ -29,6 +29,19 @@ describe('DataDragon.resolve', () => {
     expect(dd.currentPatch).toBe('14.16.1')
   })
 
+  it('resolves the internal key used by the CDN icon URLs', () => {
+    // The Live Client sends display names; Data Dragon files are named by key.
+    expect(dd.resolve('Master Yi')?.key).toBe('MasterYi')
+    expect(dd.resolve('MasterYi')?.key).toBe('MasterYi')
+    expect(dd.resolve('Wukong')?.key).toBe('MonkeyKing')
+    expect(dd.resolve('Miss Fortune')?.key).toBe('MissFortune')
+  })
+
+  it('resolves punctuated and spaced names without a linear scan', () => {
+    expect(dd.resolve('master yi')?.id).toBe(11)
+    expect(dd.resolve('MISS FORTUNE')?.id).toBe(21)
+  })
+
   it('returns undefined for unknown champions', () => {
     expect(dd.resolve('Nonexistent')).toBeUndefined()
     expect(dd.resolve('')).toBeUndefined()

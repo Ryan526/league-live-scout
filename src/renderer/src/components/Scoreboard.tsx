@@ -1,20 +1,21 @@
 import { useStore } from '../store'
 import { TeamPanel } from './TeamPanel'
 import type { ScoutedPlayer, TeamId } from '@shared/types'
+import { roleRank } from '@shared/types'
 
-const ROLE_ORDER: Record<string, number> = {
-  TOP: 0,
-  JUNGLE: 1,
-  MIDDLE: 2,
-  BOTTOM: 3,
-  UTILITY: 4,
-  UNKNOWN: 5
+/**
+ * Top -> Jungle -> Mid -> Bot -> Support, with a stable tiebreak. Without the
+ * secondary key, equal roles fell back to Map insertion order and the list
+ * visibly jumped around as stats streamed in.
+ */
+function sortByRole(a: ScoutedPlayer, b: ScoutedPlayer): number {
+  const byRole = roleRank(a.currentRole) - roleRank(b.currentRole)
+  if (byRole !== 0) return byRole
+  return identity(a).localeCompare(identity(b))
 }
 
-function sortByRole(a: ScoutedPlayer, b: ScoutedPlayer): number {
-  const ra = ROLE_ORDER[a.currentRole ?? 'UNKNOWN'] ?? 5
-  const rb = ROLE_ORDER[b.currentRole ?? 'UNKNOWN'] ?? 5
-  return ra - rb
+function identity(p: ScoutedPlayer): string {
+  return p.live.riotId || p.live.gameName || p.live.championName || ''
 }
 
 export function Scoreboard(): JSX.Element {

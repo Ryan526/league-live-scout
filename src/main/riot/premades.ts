@@ -11,17 +11,18 @@
 // history, and won't see premades whose match history is private), so callers
 // should present it as a hint.
 
+/**
+ * How many recent same-side games two players must share before we call them
+ * premade. One shared game is common noise in a small player pool; two is
+ * already unlikely by chance.
+ */
+export const PREMADE_SHARED_GAMES = 2
+
 export interface PremadeInput {
   /** Stable key for the player (e.g. Riot ID). */
   key: string
   /** This player's recent matches as (matchId, historical teamId) pairs. */
   matches: Array<{ matchId: string; teamId: number }>
-}
-
-export interface PremadeGroup {
-  /** 0-based group id, assigned in order of first member encountered. */
-  group: number
-  members: string[]
 }
 
 class UnionFind {
@@ -66,7 +67,7 @@ export function sharedSameTeamCount(a: PremadeInput, b: PremadeInput): number {
  */
 export function detectPremades(
   team: PremadeInput[],
-  threshold = 2
+  threshold = PREMADE_SHARED_GAMES
 ): Map<string, number> {
   const uf = new UnionFind()
   for (const p of team) uf.find(p.key) // ensure singletons exist

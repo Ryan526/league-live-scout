@@ -12,7 +12,8 @@ champion picked:
 - **Rank / tier / LP** and overall ranked win rate (solo/duo)
 - **Win rate on the champion they're currently on** (from recent games)
 - **Average KDA** over recent games
-- **Main-role indicator** (and an off-role flag when they're out of position)
+- **Current lane and main-role indicator** (with an off-role flag when they're
+  out of position), the board ordered Top → Jungle → Mid → Bot → Support
 - **Champion mastery** level & points (one-trick / experience signal)
 - **Premade / duo detection** — who queued together vs. solo
 - **Recent form** (W/L of the last games) and the **live scoreboard** in game
@@ -20,8 +21,11 @@ champion picked:
 It runs as a standalone window to keep on a second monitor or alt-tab to — no
 in-game overlay (that can be added later).
 
-> Enemy roles and premade groups are **inferred** (the client never reveals the
-> enemy team pre-game), so those are labelled as hints, not facts.
+> Roles come from the game itself wherever possible (the Live Client reports an
+> assigned lane for **both** teams) and from champ select for your own side.
+> Where neither is available the role is inferred from summoner spells, champion
+> tags and the player's most-played ranked role, and is marked with a `?` so a
+> guess reads as a guess. Premade groups are always inferred.
 
 ## How it works
 
@@ -33,16 +37,19 @@ Three data sources feed a small state machine
    picks + assigned roles.
 2. **Live Client Data API** (`https://127.0.0.1:2999/liveclientdata/allgamedata`,
    no auth) — available from the loading screen onward, this returns **all 10
-   players** including the enemy team, their champions, summoner spells, and the
-   live scoreboard.
+   players** including the enemy team, their champions, summoner spells, assigned
+   lanes, and the live scoreboard.
 3. **Riot Games API** (personal key) — per player: `account-v1` → PUUID,
    `league-v4` → rank, `champion-mastery-v4` → mastery, and `match-v5` → recent
    games for champ win rate, KDA, main role, and premade detection.
    **Data Dragon** maps champion names ↔ ids and is cached per patch.
 
-All Riot API calls go through a **rate-limited queue** (honoring the personal-key
-20 req/s + 100 req/2 min budget and `Retry-After` on 429s) and a **PUUID-keyed
-TTL cache**, so re-scouting the same players is instant and stays within limits.
+All Riot API calls go through a **rate-limited queue**. It starts on the
+conservative personal-key budget (20 req/s + 100 req/2 min) and then adopts
+whatever `X-App-Rate-Limit` advertises, so a production key isn't throttled to
+dev-key speed; 429s back off using `Retry-After`. Results land in a
+**region-scoped TTL cache** so ordinary polling is free, while **Re-scout**
+bypasses it and genuinely refetches.
 
 ## Setup
 
@@ -78,7 +85,10 @@ ranked). At champ select the app pre-warms your own team; at the loading screen
 it pulls all 10 players and fills in stats progressively (cheap data first, then
 match-derived stats).
 
-Region defaults to **NA** (`na1` / `americas`) and can be changed in Settings.
+Region defaults to **NA** and can be changed in Settings; all live platforms are
+listed. Note that `match-v5` and `account-v1` route differently for OCE, VN and
+TW (match data lives on `sea`, which `account-v1` does not serve), which the
+region table handles for you.
 
 ## Scripts
 
@@ -107,7 +117,7 @@ src/
       cache.ts             TTL cache with on-disk persistence
       ddragon.ts           Data Dragon champion lookup
       stats.ts             Pure match-derived stat functions
-      roles.ts             Enemy role inference
+      roles.ts             Role assignment (exact lanes + scored inference)
       premades.ts          Premade/duo detection
   preload/index.ts         Typed IPC bridge (window.scout)
   renderer/                React UI (Zustand store, components)
@@ -120,10 +130,11 @@ test/                      Vitest unit tests + fixtures
 npm test
 ```
 
-Covers the state-machine stat derivation, the rate limiter (throttling +
-`Retry-After` backoff + header reconciliation), premade detection, role
-inference, Data Dragon resolution, the Live Client parser, and the TTL cache —
-all deterministic and offline using recorded-shape fixtures.
+Covers stat derivation, the rate limiter (throttling + `Retry-After` backoff +
+header reconciliation), premade detection, role assignment and scoreboard
+ordering, Data Dragon resolution, the Live Client parser and merge rules, and
+the TTL cache (including the Re-scout bypass) — all deterministic and offline
+using recorded-shape fixtures.
 
 **Live end-to-end:** launch the League client, enter a bot or normal game, and
 confirm all 10 players load with stats while the request-queue readout in the
@@ -136,8 +147,11 @@ status bar stays within limits (and re-scouting hits the cache).
   `127.0.0.1:2999`** and nowhere else.
 - **No scraping:** everything comes from official Riot endpoints. Respect the
   [Riot API developer policies](https://developer.riotgames.com/policies/general).
-- **Approximate signals:** enemy current-role and premade groups are inferred
-  from spells / champion tags / shared match history and can be wrong.
+- **Approximate signals:** premade groups, and any role shown with a `?`, are
+  inferred from spells / champion tags / ranked history / shared match history
+  and can be wrong.
+- **Summoner's Rift only:** lane assignment and off-role flags are skipped in
+  modes without assigned lanes (ARAM, Arena), where they would be meaningless.
 
 ## License
 

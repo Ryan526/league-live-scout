@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { deriveStats, normalizeRole, modeRole, winRate } from '../src/main/riot/stats'
+import { deriveStats, normalizeRole, modeRole } from '../src/main/riot/stats'
 import { match, participant } from './fixtures'
 
 const ME = 'puuid-me'
@@ -38,7 +38,7 @@ describe('deriveStats', () => {
     ]
     const stats = deriveStats(ME, matches, {})
     // (10 + 0) / max(1, 0) = 10
-    expect(stats.avgKda).toBe(10)
+    expect(stats.kdaRatio).toBe(10)
   })
 
   it('averages KDA correctly across games', () => {
@@ -48,7 +48,7 @@ describe('deriveStats', () => {
     ]
     const stats = deriveStats(ME, matches, {})
     // total K=10, D=6, A=10 => (10+10)/6
-    expect(stats.avgKda).toBeCloseTo(20 / 6)
+    expect(stats.kdaRatio).toBeCloseTo(20 / 6)
     expect(stats.avgKills).toBe(5)
     expect(stats.avgDeaths).toBe(3)
     expect(stats.avgAssists).toBe(5)
@@ -94,7 +94,7 @@ describe('deriveStats', () => {
     const stats = deriveStats(ME, matches, { championId: 103 })
     expect(stats.sampleSize).toBe(0)
     expect(stats.championWinRate).toBeNull()
-    expect(stats.avgKda).toBeNull()
+    expect(stats.kdaRatio).toBeNull()
     expect(stats.mainRole).toBe('UNKNOWN')
   })
 
@@ -109,12 +109,8 @@ describe('deriveStats', () => {
   })
 })
 
-describe('modeRole / winRate', () => {
-  it('modeRole returns UNKNOWN when empty', () => {
+describe('modeRole', () => {
+  it('returns UNKNOWN when empty', () => {
     expect(modeRole({})).toBe('UNKNOWN')
-  })
-  it('winRate handles zero games', () => {
-    expect(winRate(0, 0)).toBeNull()
-    expect(winRate(3, 1)).toBe(0.75)
   })
 })

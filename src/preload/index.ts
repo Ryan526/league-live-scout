@@ -15,8 +15,11 @@ const api = {
   clearApiKey: (): Promise<AppSettings> => ipcRenderer.invoke(IPC.clearApiKey),
   setRegion: (region: RegionConfig): Promise<AppSettings> =>
     ipcRenderer.invoke(IPC.setRegion, region),
+  setLivePollMs: (ms: number): Promise<AppSettings> =>
+    ipcRenderer.invoke(IPC.setLivePollMs, ms),
   testApiKey: (): Promise<{ ok: boolean; message: string }> =>
     ipcRenderer.invoke(IPC.testApiKey),
+  clearPeakRanks: (): Promise<ScoutSnapshot> => ipcRenderer.invoke(IPC.clearPeakRanks),
   rescout: (): Promise<ScoutSnapshot> => ipcRenderer.invoke(IPC.rescout),
   resizeToContent: (width: number, height: number): void =>
     ipcRenderer.send(IPC.resizeWindow, { width, height }),

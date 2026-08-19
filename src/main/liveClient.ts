@@ -11,9 +11,12 @@ import { EventEmitter } from 'events'
 import { Agent } from 'https'
 import { get } from 'https'
 import type { LivePlayer, LiveScores, TeamId } from '@shared/types'
+import { normalizeRole } from './riot/stats'
 
 const HOST = '127.0.0.1'
 const PORT = 2999
+const REQUEST_TIMEOUT_MS = 4000
+const MIN_POLL_MS = 1000
 
 // Unverified agent, localhost-only. Never used for any other host.
 const localhostAgent = new Agent({ rejectUnauthorized: false, keepAlive: true })
@@ -42,6 +45,8 @@ interface AllGameData {
     championName?: string
     rawChampionName?: string
     team?: string
+    /** TOP | JUNGLE | MIDDLE | BOTTOM | UTILITY, empty outside laned queues. */
+    position?: string
     isBot?: boolean
     summonerSpells?: {
       summonerSpellOne?: { displayName?: string }
@@ -65,7 +70,7 @@ export class LiveClient extends EventEmitter {
 
   constructor(pollMs = 5000) {
     super()
-    this.pollMs = pollMs
+    this.pollMs = Math.max(MIN_POLL_MS, pollMs)
   }
 
   get isConnected(): boolean {
@@ -73,7 +78,7 @@ export class LiveClient extends EventEmitter {
   }
 
   setPollInterval(ms: number): void {
-    this.pollMs = Math.max(1000, ms)
+    this.pollMs = Math.max(MIN_POLL_MS, ms)
   }
 
   start(): void {
@@ -103,7 +108,7 @@ export class LiveClient extends EventEmitter {
           port: PORT,
           path: '/liveclientdata/allgamedata',
           agent: localhostAgent,
-          timeout: 4000
+          timeout: REQUEST_TIMEOUT_MS
         },
         (res) => {
           if (res.statusCode !== 200) {
@@ -133,21 +138,33 @@ export class LiveClient extends EventEmitter {
 
   private async tick(): Promise<void> {
     if (!this.active) return
-    const data = await this.fetchOnce()
-    if (data && data.allPlayers) {
-      if (!this.wasConnected) {
-        this.wasConnected = true
-        this.emit('connected')
+    try {
+      const data = await this.fetchOnce()
+      // stop() may have landed while the fetch was in flight; emitting now
+      // would resurrect `wasConnected` and, with a start() in between, leave
+      // two polling chains running at twice the rate.
+      if (!this.active) return
+      if (data && data.allPlayers) {
+        if (!this.wasConnected) {
+          this.wasConnected = true
+          this.emit('connected')
+        }
+        const players = parsePlayers(data)
+        this.emit('players', players, data.gameData?.gameMode ?? 'CLASSIC')
+      } else if (this.wasConnected) {
+        this.wasConnected = false
+        this.emit('disconnected')
       }
-      const players = parsePlayers(data)
-      this.emit('players', players, data.gameData?.gameMode ?? 'CLASSIC')
-    } else if (this.wasConnected) {
-      this.wasConnected = false
-      this.emit('disconnected')
-    }
-    if (this.active) {
-      this.timer = setTimeout(() => void this.tick(), this.pollMs)
-      if (typeof this.timer.unref === 'function') this.timer.unref()
+    } catch (e) {
+      // A listener that throws must not take the poller down with it: without
+      // this the timer below never re-arms and the app silently stops seeing
+      // the game for the rest of the session.
+      console.error('[liveClient] tick failed:', e)
+    } finally {
+      if (this.active) {
+        this.timer = setTimeout(() => void this.tick(), this.pollMs)
+        if (typeof this.timer.unref === 'function') this.timer.unref()
+      }
     }
   }
 }
@@ -203,10 +220,39 @@ export function parsePlayers(data: AllGameData): LivePlayer[] {
       tagLine,
       championName: p.championName || p.rawChampionName || '',
       team: toTeam(p.team),
+      // The Live Client knows the assigned lane for BOTH teams. It costs no
+      // Riot API quota and beats any inference we could do.
+      position: normalizeRole(p.position),
       summonerSpells: spells,
       isBot: Boolean(p.isBot),
       scores
     })
   }
   return out
+}
+
+/**
+ * Merge a freshly-polled player over the one we are already tracking.
+ *
+ * A naive `{ ...existing, ...next }` loses data: the Live Client intermittently
+ * omits `scores` (making the live K/D/A flicker) and reports an empty
+ * `position` on some payloads, and `parsePlayers` always emits every key. This
+ * treats "absent" and "UNKNOWN" as "no news" and keeps the better value.
+ */
+export function mergeLivePlayer(existing: LivePlayer, next: LivePlayer): LivePlayer {
+  const merged: LivePlayer = { ...existing }
+
+  if (next.riotId) merged.riotId = next.riotId
+  if (next.gameName) merged.gameName = next.gameName
+  if (next.tagLine) merged.tagLine = next.tagLine
+  if (next.championName) merged.championName = next.championName
+  if (next.championId != null) merged.championId = next.championId
+  if (next.championKey) merged.championKey = next.championKey
+  if (next.team !== 'UNKNOWN') merged.team = next.team
+  if (next.position && next.position !== 'UNKNOWN') merged.position = next.position
+  if (next.summonerSpells.length > 0) merged.summonerSpells = next.summonerSpells
+  if (next.scores) merged.scores = next.scores
+  merged.isBot = next.isBot
+
+  return merged
 }

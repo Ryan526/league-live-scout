@@ -3,7 +3,14 @@
 // respect for Retry-After.
 
 import type { RankEntry, RegionConfig } from '@shared/types'
+import { accountRoute } from '@shared/types'
 import { RateLimiter } from './rateLimiter'
+
+/** Give up on a hung connection. Without this the limiter's in-flight counter
+ *  never decrements and the affected player loads forever. */
+const REQUEST_TIMEOUT_MS = 12_000
+/** Default match-id page size when a caller doesn't specify one. */
+export const DEFAULT_MATCH_COUNT = 10
 
 export interface AccountDto {
   puuid: string
@@ -26,10 +33,14 @@ export interface ChampionMasteryDto {
   championPoints: number
 }
 
+/**
+ * The slice of match-v5 we actually use. A raw MatchDto is enormous (~150
+ * fields per participant) and a single game caches 10 of them per player, so
+ * `getMatch` projects down to this before anything touches the cache.
+ */
 export interface MatchDto {
-  metadata: { matchId: string; participants: string[] }
+  metadata: { matchId: string }
   info: {
-    gameMode: string
     queueId: number
     gameDuration: number
     participants: MatchParticipantDto[]
@@ -41,7 +52,6 @@ export interface MatchParticipantDto {
   /** 100 (blue) or 200 (red) in the historical match. */
   teamId: number
   championId: number
-  championName: string
   kills: number
   deaths: number
   assists: number
@@ -98,8 +108,14 @@ export class RiotClient {
     return `https://${this.region.platform}.api.riotgames.com`
   }
 
-  private regionalHost(): string {
+  /** match-v5 and friends. May be 'sea', which account-v1 does not serve. */
+  private matchHost(): string {
     return `https://${this.region.regional}.api.riotgames.com`
+  }
+
+  /** account-v1 only routes to americas/asia/europe. */
+  private accountHost(): string {
+    return `https://${accountRoute(this.region)}.api.riotgames.com`
   }
 
   /** Core request: rate-limited, header-reconciled, retrying. */
@@ -112,8 +128,13 @@ export class RiotClient {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const res = await this.limiter.schedule(() =>
-        this.fetchImpl(url, { headers: { 'X-Riot-Token': key } })
+        this.fetchImpl(url, {
+          headers: { 'X-Riot-Token': key },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        })
       )
+      // Riot tells us both the budget and our usage; adopt both.
+      this.limiter.applyLimitsFromHeader(res.headers.get('x-app-rate-limit'))
       this.limiter.reconcileFromHeader(res.headers.get('x-app-rate-limit-count'))
 
       if (res.ok) {
@@ -126,7 +147,7 @@ export class RiotClient {
       }
 
       if (res.status === 429 || res.status >= 500) {
-        const retryAfter = Number(res.headers.get('retry-after') ?? '1')
+        const retryAfter = parseRetryAfter(res.headers.get('retry-after'))
         if (res.status === 429) this.limiter.applyRetryAfter(retryAfter)
         if (attempt++ >= this.maxRetries) {
           throw new RiotApiError(
@@ -148,12 +169,12 @@ export class RiotClient {
     }
   }
 
-  // --- account-v1 (regional route) ---
+  // --- account-v1 (account route) ---
   async getAccountByRiotId(gameName: string, tagLine: string): Promise<AccountDto> {
     const path = `/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(
       gameName
     )}/${encodeURIComponent(tagLine)}`
-    return this.request<AccountDto>(this.regionalHost(), path)
+    return this.request<AccountDto>(this.accountHost(), path)
   }
 
   // --- league-v4 (platform route) ---
@@ -184,20 +205,65 @@ export class RiotClient {
    */
   async getMatchIds(
     puuid: string,
-    count = 15,
+    count = DEFAULT_MATCH_COUNT,
     type: 'ranked' | 'normal' | 'tourney' | 'tutorial' | null = 'ranked'
   ): Promise<string[]> {
     const typeParam = type ? `&type=${type}` : ''
     const path = `/lol/match/v5/matches/by-puuid/${encodeURIComponent(
       puuid
     )}/ids?start=0&count=${count}${typeParam}`
-    return this.request<string[]>(this.regionalHost(), path)
+    return this.request<string[]>(this.matchHost(), path)
   }
 
   async getMatch(matchId: string): Promise<MatchDto> {
     const path = `/lol/match/v5/matches/${encodeURIComponent(matchId)}`
-    return this.request<MatchDto>(this.regionalHost(), path)
+    const raw = await this.request<MatchDto>(this.matchHost(), path)
+    return projectMatch(raw)
   }
+}
+
+/**
+ * Keep only the fields the app reads. `res.json()` hands back every field Riot
+ * sends regardless of the declared type, and those objects go straight into the
+ * persisted cache; projecting here keeps cache.json in the low hundreds of KB
+ * instead of tens of MB.
+ */
+export function projectMatch(raw: MatchDto): MatchDto {
+  return {
+    metadata: { matchId: raw.metadata?.matchId },
+    info: {
+      queueId: raw.info?.queueId,
+      gameDuration: raw.info?.gameDuration,
+      participants: (raw.info?.participants ?? []).map((p) => ({
+        puuid: p.puuid,
+        teamId: p.teamId,
+        championId: p.championId,
+        kills: p.kills,
+        deaths: p.deaths,
+        assists: p.assists,
+        win: p.win,
+        teamPosition: p.teamPosition,
+        individualPosition: p.individualPosition,
+        totalMinionsKilled: p.totalMinionsKilled,
+        neutralMinionsKilled: p.neutralMinionsKilled
+      }))
+    }
+  }
+}
+
+/**
+ * Retry-After is "delay-seconds" for Riot, but the HTTP spec also allows an
+ * HTTP-date and proxies do send them. `Number(date)` is NaN, which silently
+ * disabled the backoff gate and made `setTimeout(fn, NaN)` fire immediately —
+ * i.e. a burst of retries straight back at an endpoint that just 429'd.
+ */
+export function parseRetryAfter(header: string | null | undefined, now = Date.now()): number {
+  if (!header) return 1
+  const seconds = Number(header)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds
+  const date = Date.parse(header)
+  if (Number.isFinite(date)) return Math.max(0, (date - now) / 1000)
+  return 1
 }
 
 /** Convert a raw league entry DTO into the shared RankEntry shape. */
