@@ -333,6 +333,12 @@ a {
   color: var(--muted);
   border: 1px solid var(--line);
 }
+.self-tag {
+  background: var(--accent);
+  color: #0b0b12;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
 
 /* rank tier colors */
 .tier-iron { color: #7c7c7c; }

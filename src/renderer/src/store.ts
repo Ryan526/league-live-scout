@@ -4,7 +4,9 @@ import type { AppSettings, RateLimiterStatus, ScoutSnapshot } from '@shared/type
 interface ScoutStore {
   snapshot: ScoutSnapshot | null
   settings: AppSettings | null
-  rate: RateLimiterStatus | null
+  /** Latest queue status, stamped on arrival so the UI can age the ETA
+   *  between pushes rather than showing a value that is already stale. */
+  rate: (RateLimiterStatus & { receivedAt: number }) | null
   logs: string[]
   settingsOpen: boolean
 
@@ -24,7 +26,7 @@ export const useStore = create<ScoutStore>((set) => ({
 
   setSnapshot: (s) => set({ snapshot: s }),
   setSettings: (s) => set({ settings: s }),
-  setRate: (r) => set({ rate: r }),
+  setRate: (r) => set({ rate: { ...r, receivedAt: Date.now() } }),
   pushLog: (line) =>
     set((state) => ({
       logs: [`${new Date().toLocaleTimeString()}  ${line}`, ...state.logs].slice(0, 200)

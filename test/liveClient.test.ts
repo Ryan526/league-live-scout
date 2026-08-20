@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { mergeLivePlayer, parsePlayers } from '../src/main/liveClient'
+import { activePlayerId, mergeLivePlayer, parsePlayers } from '../src/main/liveClient'
 import type { LivePlayer } from '../src/shared/types'
 
 // A trimmed sample of the /liveclientdata/allgamedata payload.
@@ -150,5 +150,78 @@ describe('mergeLivePlayer', () => {
     )
     expect(merged.position).toBe('TOP')
     expect(merged.scores?.kills).toBe(9)
+  })
+})
+
+describe('self detection', () => {
+  const withActive = (activePlayer: Record<string, string>) => ({ ...SAMPLE, activePlayer })
+
+  it('flags exactly one player as self from a combined riotId', () => {
+    const players = parsePlayers(withActive({ riotId: 'Faker#KR1' }))
+    expect(players.filter((p) => p.isSelf)).toHaveLength(1)
+    expect(players[0].isSelf).toBe(true)
+  })
+
+  it('flags self from split gameName/tagLine fields', () => {
+    const players = parsePlayers(
+      withActive({ riotIdGameName: 'Some Jungler', riotIdTagLine: 'NA1' })
+    )
+    expect(players[1].isSelf).toBe(true)
+    expect(players[0].isSelf).toBe(false)
+  })
+
+  it('matches case-insensitively', () => {
+    const players = parsePlayers(withActive({ riotId: 'faker#kr1' }))
+    expect(players[0].isSelf).toBe(true)
+  })
+
+  it('falls back to a name-only match when the active player has no tagline', () => {
+    // Older payloads carry summonerName with no tag at all.
+    const players = parsePlayers(withActive({ summonerName: 'Faker' }))
+    expect(players[0].isSelf).toBe(true)
+  })
+
+  it('flags nobody when the payload has no activePlayer', () => {
+    // Failing open costs quota; failing closed would silently skip a stranger.
+    const players = parsePlayers(SAMPLE)
+    expect(players.some((p) => p.isSelf)).toBe(false)
+  })
+
+  it('flags nobody when the active player is not on the roster', () => {
+    const players = parsePlayers(withActive({ riotId: 'Someone Else#EUW' }))
+    expect(players.some((p) => p.isSelf)).toBe(false)
+  })
+
+  it('does not match a different tagline on the same game name', () => {
+    const players = parsePlayers(withActive({ riotId: 'Faker#NA1' }))
+    expect(players.some((p) => p.isSelf)).toBe(false)
+  })
+
+  it('ignores an empty activePlayer identity', () => {
+    expect(activePlayerId({ activePlayer: { riotId: '   ' } })).toBeNull()
+    expect(activePlayerId({})).toBeNull()
+  })
+})
+
+describe('mergeLivePlayer self latching', () => {
+  const base = (over: Partial<LivePlayer>): LivePlayer => ({
+    riotId: 'Faker#KR1',
+    gameName: 'Faker',
+    tagLine: 'KR1',
+    championName: 'Ahri',
+    team: 'ORDER',
+    summonerSpells: [],
+    isBot: false,
+    ...over
+  })
+
+  it('keeps self set when a later poll omits activePlayer', () => {
+    const merged = mergeLivePlayer(base({ isSelf: true }), base({ isSelf: false }))
+    expect(merged.isSelf).toBe(true)
+  })
+
+  it('adopts self when the first poll lacked it', () => {
+    const merged = mergeLivePlayer(base({ isSelf: false }), base({ isSelf: true }))
+    expect(merged.isSelf).toBe(true)
   })
 })

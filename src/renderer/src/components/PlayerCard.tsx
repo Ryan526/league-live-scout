@@ -72,6 +72,11 @@ export function PlayerCard({ player, patch, groupColor }: Props): JSX.Element {
           <div className="pc-name" title={live.riotId}>
             {live.gameName || 'Unknown'}
             {live.isBot && <span className="tag bot-tag">BOT</span>}
+            {live.isSelf && (
+              <span className="tag self-tag" title="This is you">
+                YOU
+              </span>
+            )}
           </div>
           <div className="pc-sub">
             <span className="champ-name">{live.championName || '—'}</span>

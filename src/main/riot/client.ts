@@ -12,6 +12,19 @@ const REQUEST_TIMEOUT_MS = 12_000
 /** Default match-id page size when a caller doesn't specify one. */
 export const DEFAULT_MATCH_COUNT = 10
 
+/**
+ * Riot budgets rate limits per *method*, not per URL, so every match lookup
+ * shares one bucket no matter which match id it names. These keys mirror that
+ * grouping; they are what the limiter charges against.
+ */
+export const RiotMethod = {
+  AccountByRiotId: 'account-v1.getByRiotId',
+  LeagueByPuuid: 'league-v4.getEntriesByPUUID',
+  MasteryByChampion: 'champion-mastery-v4.getChampionMasteryByPUUID',
+  MatchIdsByPuuid: 'match-v5.getMatchIdsByPUUID',
+  MatchById: 'match-v5.getMatch'
+} as const
+
 export interface AccountDto {
   puuid: string
   gameName: string
@@ -118,8 +131,9 @@ export class RiotClient {
     return `https://${accountRoute(this.region)}.api.riotgames.com`
   }
 
-  /** Core request: rate-limited, header-reconciled, retrying. */
-  private async request<T>(host: string, path: string): Promise<T> {
+  /** Core request: rate-limited, header-reconciled, retrying.
+   *  `method` names the endpoint so its own budget is tracked separately. */
+  private async request<T>(host: string, path: string, method: string): Promise<T> {
     const key = this.getApiKey()
     if (!key) throw new RiotApiError('No Riot API key configured', 401, path)
     const url = `${host}${path}`
@@ -127,15 +141,25 @@ export class RiotClient {
     let attempt = 0
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const res = await this.limiter.schedule(() =>
-        this.fetchImpl(url, {
-          headers: { 'X-Riot-Token': key },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-        })
+      const res = await this.limiter.schedule(
+        () =>
+          this.fetchImpl(url, {
+            headers: { 'X-Riot-Token': key },
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+          }),
+        method
       )
-      // Riot tells us both the budget and our usage; adopt both.
+      // Riot tells us both budgets and our usage against each; adopt all four.
       this.limiter.applyLimitsFromHeader(res.headers.get('x-app-rate-limit'))
       this.limiter.reconcileFromHeader(res.headers.get('x-app-rate-limit-count'))
+      this.limiter.applyMethodLimitsFromHeader(
+        method,
+        res.headers.get('x-method-rate-limit')
+      )
+      this.limiter.reconcileMethodFromHeader(
+        method,
+        res.headers.get('x-method-rate-limit-count')
+      )
 
       if (res.ok) {
         return (await res.json()) as T
@@ -148,7 +172,12 @@ export class RiotClient {
 
       if (res.status === 429 || res.status >= 500) {
         const retryAfter = parseRetryAfter(res.headers.get('retry-after'))
-        if (res.status === 429) this.limiter.applyRetryAfter(retryAfter)
+        if (res.status === 429) {
+          // A method-scoped 429 must not stall every other endpoint; only an
+          // application (or unlabelled) one justifies a global backoff.
+          const scope = res.headers.get('x-rate-limit-type')?.toLowerCase()
+          this.limiter.applyRetryAfter(retryAfter, scope === 'method' ? method : undefined)
+        }
         if (attempt++ >= this.maxRetries) {
           throw new RiotApiError(
             `Riot API ${res.status} after ${attempt} attempts`,
@@ -174,13 +203,13 @@ export class RiotClient {
     const path = `/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(
       gameName
     )}/${encodeURIComponent(tagLine)}`
-    return this.request<AccountDto>(this.accountHost(), path)
+    return this.request<AccountDto>(this.accountHost(), path, RiotMethod.AccountByRiotId)
   }
 
   // --- league-v4 (platform route) ---
   async getLeagueEntriesByPuuid(puuid: string): Promise<LeagueEntryDto[]> {
     const path = `/lol/league/v4/entries/by-puuid/${encodeURIComponent(puuid)}`
-    return this.request<LeagueEntryDto[]>(this.platformHost(), path)
+    return this.request<LeagueEntryDto[]>(this.platformHost(), path, RiotMethod.LeagueByPuuid)
   }
 
   // --- champion-mastery-v4 (platform route) ---
@@ -189,7 +218,11 @@ export class RiotClient {
       puuid
     )}/by-champion/${championId}`
     try {
-      return await this.request<ChampionMasteryDto>(this.platformHost(), path)
+      return await this.request<ChampionMasteryDto>(
+        this.platformHost(),
+        path,
+        RiotMethod.MasteryByChampion
+      )
     } catch (e) {
       // No mastery on this champ is a 404 — treat as "never played".
       if (e instanceof RiotApiError && e.status === 404) return null
@@ -212,12 +245,12 @@ export class RiotClient {
     const path = `/lol/match/v5/matches/by-puuid/${encodeURIComponent(
       puuid
     )}/ids?start=0&count=${count}${typeParam}`
-    return this.request<string[]>(this.matchHost(), path)
+    return this.request<string[]>(this.matchHost(), path, RiotMethod.MatchIdsByPuuid)
   }
 
   async getMatch(matchId: string): Promise<MatchDto> {
     const path = `/lol/match/v5/matches/${encodeURIComponent(matchId)}`
-    const raw = await this.request<MatchDto>(this.matchHost(), path)
+    const raw = await this.request<MatchDto>(this.matchHost(), path, RiotMethod.MatchById)
     return projectMatch(raw)
   }
 }

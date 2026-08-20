@@ -44,6 +44,16 @@ Three data sources feed a small state machine
    games for champ win rate, KDA, main role, and premade detection.
    **Data Dragon** maps champion names ↔ ids and is cached per patch.
 
+A cold game costs `10 players x (4 + 5 recent matches)` = **90 requests**: one
+each for Riot ID, rank, mastery and the match-id list, plus one per sampled
+match. Premades share cached match details, so real games land under that.
+
+Riot enforces two budgets at once — an **app** limit shared by every endpoint and
+a **method** limit per endpoint — and the queue tracks both, learning each from
+`X-App-Rate-Limit` / `X-Method-Rate-Limit` on live responses rather than
+hardcoding them. A method-scoped 429 backs off only that endpoint, so one
+throttled fan-out no longer stalls the whole board.
+
 All Riot API calls go through a **rate-limited queue**. It starts on the
 conservative personal-key budget (20 req/s + 100 req/2 min) and then adopts
 whatever `X-App-Rate-Limit` advertises, so a production key isn't throttled to
@@ -83,7 +93,9 @@ npm run start
 Then just **leave the window open** and start a game (bot game, normal, or
 ranked). At champ select the app pre-warms your own team; at the loading screen
 it pulls all 10 players and fills in stats progressively (cheap data first, then
-match-derived stats).
+match-derived stats). Your own card is marked with a **YOU** badge. The status
+bar shows the request queue and an estimated countdown to a fully populated
+board.
 
 Region defaults to **NA** and can be changed in Settings; all live platforms are
 listed. Note that `match-v5` and `account-v1` route differently for OCE, VN and

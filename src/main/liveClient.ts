@@ -37,6 +37,14 @@ export declare interface LiveClient {
 
 interface AllGameData {
   gameData?: { gameMode?: string; gameTime?: number }
+  /** The local player. Riot has moved this identity between fields over the
+   *  patches, so every known spelling is accepted. */
+  activePlayer?: {
+    riotId?: string
+    riotIdGameName?: string
+    riotIdTagLine?: string
+    summonerName?: string
+  }
   allPlayers?: Array<{
     riotId?: string
     riotIdGameName?: string
@@ -196,8 +204,42 @@ function splitRiotId(p: NonNullable<AllGameData['allPlayers']>[number]): {
   return { riotId: raw, gameName: raw, tagLine: '' }
 }
 
+/**
+ * The local player's identity, normalized. Returns null when the payload
+ * carries no usable identity at all — in which case nobody is flagged as self
+ * and every player is enriched, which is the safe direction to fail.
+ */
+export function activePlayerId(data: AllGameData): string | null {
+  const ap = data.activePlayer
+  if (!ap) return null
+  const raw =
+    ap.riotId ||
+    (ap.riotIdGameName ? `${ap.riotIdGameName}#${ap.riotIdTagLine ?? ''}` : '') ||
+    ap.summonerName ||
+    ''
+  const id = raw.trim().toLowerCase()
+  return id.length > 0 ? id : null
+}
+
+/**
+ * Match the active player against a roster entry. Riot is inconsistent about
+ * whether the tagline is included, so a bare game name from either side is
+ * allowed to match on the name alone.
+ */
+export function matchesSelf(selfId: string, riotId: string, gameName: string): boolean {
+  const full = riotId.trim().toLowerCase()
+  const name = gameName.trim().toLowerCase()
+  if (full && selfId === full) return true
+  if (!name) return false
+  // Only fall back to a name-only comparison when one side lacks a tagline;
+  // two players can share a game name across taglines.
+  if (!selfId.includes('#') || !full.includes('#')) return selfId === name
+  return false
+}
+
 export function parsePlayers(data: AllGameData): LivePlayer[] {
   const out: LivePlayer[] = []
+  const selfId = activePlayerId(data)
   for (const p of data.allPlayers ?? []) {
     const { riotId, gameName, tagLine } = splitRiotId(p)
     const spells: string[] = []
@@ -225,6 +267,7 @@ export function parsePlayers(data: AllGameData): LivePlayer[] {
       position: normalizeRole(p.position),
       summonerSpells: spells,
       isBot: Boolean(p.isBot),
+      isSelf: selfId != null && matchesSelf(selfId, riotId, gameName),
       scores
     })
   }
@@ -253,6 +296,10 @@ export function mergeLivePlayer(existing: LivePlayer, next: LivePlayer): LivePla
   if (next.summonerSpells.length > 0) merged.summonerSpells = next.summonerSpells
   if (next.scores) merged.scores = next.scores
   merged.isBot = next.isBot
+  // Who you are cannot change mid-game, and `activePlayer` is intermittently
+  // absent from the payload. Latch it so a single thin poll doesn't un-flag
+  // self and hand the whole enrichment fan-out an extra player.
+  merged.isSelf = existing.isSelf || next.isSelf
 
   return merged
 }

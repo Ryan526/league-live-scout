@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { RateLimiter, parseLimitHeader } from '../src/main/riot/rateLimiter'
 
+/** Let every pending continuation run. A single `await Promise.resolve()`
+ *  only drains one microtask tick, which is not enough for the limiter's
+ *  wake-up path (race -> finally -> resume caller). */
+async function flush(ticks = 16): Promise<void> {
+  for (let i = 0; i < ticks; i++) await Promise.resolve()
+}
+
 /** A controllable fake clock + sleep so tests are deterministic and instant. */
 function fakeClock() {
   let t = 0
@@ -19,11 +26,11 @@ function fakeClock() {
         t = timer.at
         timer.resolve()
         // Let scheduled continuations run.
-        await Promise.resolve()
+        await flush()
         timers.sort((a, b) => a.at - b.at)
       }
       t = target
-      await Promise.resolve()
+      await flush()
     }
   }
 }
@@ -213,5 +220,143 @@ describe('clearQueue', () => {
     limiter.clearQueue()
     await expect(queued).rejects.toThrow('Rate limiter shut down')
     expect(limiter.status().queued).toBe(0)
+  })
+})
+
+describe('method rate limits', () => {
+  /** Roomy app budget so the method window is provably what binds. */
+  const roomy = [{ limit: 1000, intervalMs: 1000 }]
+
+  it('starts unconstrained until the endpoint has answered once', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ appWindows: roomy, now: clock.now, sleep: clock.sleep })
+    let done = 0
+    for (let i = 0; i < 5; i++) void limiter.schedule(async () => done++, 'match-v5.getMatch')
+    await clock.advance(0)
+    expect(done).toBe(5)
+    expect(limiter.methodWindows('match-v5.getMatch')).toEqual([])
+  })
+
+  it('throttles on the method budget even when the app budget is idle', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ appWindows: roomy, now: clock.now, sleep: clock.sleep })
+    limiter.applyMethodLimitsFromHeader('match-v5.getMatch', '2:10')
+
+    let done = 0
+    for (let i = 0; i < 4; i++) void limiter.schedule(async () => done++, 'match-v5.getMatch')
+    await clock.advance(0)
+    // safety 0.95 of 2 -> cap 1 per 10s.
+    expect(done).toBe(1)
+    await clock.advance(10_000)
+    expect(done).toBe(2)
+  })
+
+  it('keeps each endpoint on its own budget', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ appWindows: roomy, now: clock.now, sleep: clock.sleep })
+    limiter.applyMethodLimitsFromHeader('match-v5.getMatch', '2:10')
+
+    const order: string[] = []
+    // The throttled endpoint is queued first; a different endpoint must not be
+    // stuck behind it.
+    for (let i = 0; i < 3; i++) {
+      void limiter.schedule(async () => order.push('match'), 'match-v5.getMatch')
+    }
+    void limiter.schedule(async () => order.push('rank'), 'league-v4.getEntriesByPUUID')
+    await clock.advance(0)
+    expect(order).toEqual(['match', 'rank'])
+  })
+
+  it('confines a method-scoped 429 to that endpoint', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ appWindows: roomy, now: clock.now, sleep: clock.sleep })
+    limiter.applyRetryAfter(5, 'match-v5.getMatch')
+
+    const order: string[] = []
+    void limiter.schedule(async () => order.push('match'), 'match-v5.getMatch')
+    void limiter.schedule(async () => order.push('rank'), 'league-v4.getEntriesByPUUID')
+    await clock.advance(0)
+    expect(order).toEqual(['rank'])
+    // A method backoff is not an app backoff.
+    expect(limiter.status().retryAfterUntil).toBeUndefined()
+    await clock.advance(5000)
+    expect(order).toEqual(['rank', 'match'])
+  })
+
+  it('reconciles a method count only once its budget is known', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ appWindows: roomy, now: clock.now, sleep: clock.sleep })
+    // No budget yet: nothing to charge against, and no crash.
+    limiter.reconcileMethodFromHeader('match-v5.getMatch', '9:10')
+    limiter.applyMethodLimitsFromHeader('match-v5.getMatch', '10:10')
+    limiter.reconcileMethodFromHeader('match-v5.getMatch', '9:10')
+
+    let done = 0
+    for (let i = 0; i < 2; i++) void limiter.schedule(async () => done++, 'match-v5.getMatch')
+    await clock.advance(0)
+    // cap is floor(10*0.95)=9 and Riot says 9 are already spent.
+    expect(done).toBe(0)
+    await clock.advance(10_000)
+    expect(done).toBe(2)
+  })
+
+  it('carries method hits across a budget change', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ appWindows: roomy, now: clock.now, sleep: clock.sleep })
+    limiter.applyMethodLimitsFromHeader('m', '10:10')
+    await limiter.schedule(async () => 'a', 'm')
+    limiter.applyMethodLimitsFromHeader('m', '2:10')
+    expect(limiter.methodWindows('m')).toEqual([{ limit: 2, intervalMs: 10_000 }])
+    let done = 0
+    void limiter.schedule(async () => done++, 'm')
+    await clock.advance(0)
+    // The earlier hit carried over and already fills the cap of 1.
+    expect(done).toBe(0)
+  })
+})
+
+describe('queue ETA', () => {
+  it('is absent when nothing is queued', () => {
+    const limiter = new RateLimiter()
+    expect(limiter.status().etaMs).toBeUndefined()
+  })
+
+  it('estimates the wait imposed by the app window', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      appWindows: [{ limit: 2, intervalMs: 1000 }],
+      now: clock.now,
+      sleep: clock.sleep
+    })
+    // cap is floor(2*0.95)=1, so these go one per second.
+    for (let i = 0; i < 4; i++) void limiter.schedule(async () => 'x')
+    await clock.advance(0)
+    // One dispatched, three still queued: they land at +1s, +2s, +3s.
+    const { queued, etaMs } = limiter.status()
+    expect(queued).toBe(3)
+    expect(etaMs).toBe(3000)
+  })
+
+  it('accounts for a method budget the app budget would not reveal', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({
+      appWindows: [{ limit: 1000, intervalMs: 1000 }],
+      now: clock.now,
+      sleep: clock.sleep
+    })
+    limiter.applyMethodLimitsFromHeader('m', '2:10')
+    for (let i = 0; i < 3; i++) void limiter.schedule(async () => 'x', 'm')
+    await clock.advance(0)
+    // App budget alone would say "now"; the method cap of 1/10s says 20s.
+    expect(limiter.status().etaMs).toBe(20_000)
+  })
+
+  it('includes an active backoff', async () => {
+    const clock = fakeClock()
+    const limiter = new RateLimiter({ now: clock.now, sleep: clock.sleep })
+    limiter.applyRetryAfter(30)
+    void limiter.schedule(async () => 'x')
+    await clock.advance(0)
+    expect(limiter.status().etaMs).toBe(30_000)
   })
 })

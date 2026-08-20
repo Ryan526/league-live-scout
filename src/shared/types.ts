@@ -70,6 +70,10 @@ export interface LivePlayer {
   position?: Role
   summonerSpells: string[]
   isBot: boolean
+  /** The local player, per the Live Client's `activePlayer`. Their stats are
+   *  the one thing the user already knows, so they are excluded from Riot API
+   *  enrichment and the budget is spent on the other nine. */
+  isSelf?: boolean
   /** Live scoreboard, when available. */
   scores?: LiveScores
 }
@@ -253,6 +257,10 @@ export interface RateLimiterStatus {
   queued: number
   /** Timestamp until which we are backing off due to a 429, if any. */
   retryAfterUntil?: number
+  /** Estimated ms until the queue is fully drained — i.e. when the board
+   *  finishes filling in. Absent when nothing is queued. An estimate: it
+   *  cannot know about retries or requests not yet queued. */
+  etaMs?: number
 }
 
 /** Ranked tiers from lowest to highest. */

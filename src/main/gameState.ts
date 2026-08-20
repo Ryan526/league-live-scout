@@ -31,8 +31,9 @@ import { detectPremades, premadeLabel, type PremadeInput } from './riot/premades
 // ---- tuning constants ----
 
 /** Recent ranked games sampled per player. Every game is one API request per
- *  player, so this is the single biggest lever on time-to-data. */
-const MATCH_SAMPLE_SIZE = 10
+ *  player, so this is the single biggest lever on time-to-data. A cold game
+ *  costs `players x (4 + MATCH_SAMPLE_SIZE)` = 10 x 9 = 90 requests. */
+const MATCH_SAMPLE_SIZE = 5
 /** Match-id lists change after every game, so they get a short TTL. */
 const MATCH_IDS_TTL_MS = 10 * 60_000
 /** Riot IDs and finished matches are effectively immutable. */
@@ -756,7 +757,10 @@ export class GameState extends EventEmitter {
       const status = this.limiter.status()
       // Only push when it actually moves; this used to IPC every second for the
       // entire life of the process even while completely idle.
-      const fingerprint = `${status.inFlight}|${status.queued}|${status.retryAfterUntil ?? 0}`
+      // The ETA is rounded to seconds: at ms resolution it changes on every
+      // tick and would defeat the "only push when it moves" guard entirely.
+      const etaSec = status.etaMs != null ? Math.round(status.etaMs / 1000) : 0
+      const fingerprint = `${status.inFlight}|${status.queued}|${status.retryAfterUntil ?? 0}|${etaSec}`
       if (fingerprint === this.lastRateStatus) return
       this.lastRateStatus = fingerprint
       this.emit('rateStatus', status)
